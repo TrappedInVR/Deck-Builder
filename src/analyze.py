@@ -587,7 +587,15 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
             adjust["protection"] = min(adjust.get("protection", 0) + 2, 6)
             notes.append("Its ability wins the game, so it gets extra protection: losing it means losing the win condition.")
     inter.sort(key=lambda p: -p["weight"])
-    return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8], role=role,
+    # which of your cards actually COUNT for it ("creatures you control with power 2 or less", "with defender"...)
+    import conditions as CN
+    conds = CN.rules(cmd, role["lines"])
+    if conds:
+        notes.append("Only some cards count for it: " + "; ".join(CN.describe(r) for r in conds) +
+                     ". Cards that count (or make tokens that do) are favored; cards that push yours out of the count are avoided.")
+        if CN.counts_creatures(conds):
+            creatures = max(creatures or 0, 30)
+    return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8], role=role, conditions=conds,
                 abilities=[dict(kind=a["kind"], text=a["text"], event=a["event"][1] if a["event"] else None,
                                 costs=[c[1] for c in a["costs"]], outputs=[o[1] for o in a["outputs"]], style=a["style"])
                            for a in parsed],
@@ -710,6 +718,14 @@ def synergy(card, profile, tribe_words=()):
             if best_v < 12:
                 best, best_v = f"{t} (named by your commander)", 12
             break
+    if profile.get("conditions"):
+        import conditions as CN
+        d, why = CN.score(card, profile["conditions"])
+        s += d
+        if d > 0 and d >= best_v:
+            best, best_v = f"counts for your commander: {why}", d
+        elif d < 0 and s <= 0:
+            best = f"doesn't fit your commander: {why}"
     return min(s, 60.0), best
 
 

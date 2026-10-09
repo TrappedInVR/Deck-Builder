@@ -21,6 +21,8 @@ from collections import Counter
 import analyze as A
 import combos as K
 import commanders as CM
+import conditions as CN
+import speed as SP
 import evaluate as E
 import lands as L
 import options as O
@@ -222,6 +224,11 @@ def build(idx, cmd, plan):
     picked, names, why = [], set(), {}
     taken = set(face_keys(cmd))           # every face name already in the deck (commander included)
     st = dict(spent=0.0, gc=1 if cmd["game_changer"] else 0, mech=0, narr=0, members=0, onplan=0)
+    # Build order (Bracket 3 first, power second): the SYNERGY CORE is built with Game Changers, tutors and fast mana
+    # held back, leaving room for them; only then are power cards added, and only if the deck still can't win
+    # before turn 6 (speed.py).
+    st["core"] = True
+    st["limit"] = n_nonland
     tagc, vtc, planc = Counter(), Counter(), Counter()
     per_card_cap = max(5.0, budget * 0.10)
     tag_caps = {"extra_turn": vibe["max_extra_turns"], "tutor": vibe["max_tutors"]}
@@ -265,12 +272,21 @@ def build(idx, cmd, plan):
             if A.plan_hits(c, p):
                 planc[p["name"]] -= 1
 
+    db = COMBO_DB
+    no_combos = "combos" in avoid
+    max_tag = "E" if no_combos else vibe["combo_max"]          # never above S: Ruthless (R) is Bracket 4
+    combos_added, combos_removed = [], []
+
+    def is_power(c):
+        """Cards that make a deck faster rather than more synergistic."""
+        return bool(c["game_changer"] or "tutor" in c["tags"] or "extra_turn" in c["tags"] or SP._is_fast(c))
+
     def blocked(c, creature_cap=None, force=False, rules_only=False):
         """Why a card can't go in right now ('' = it can). rules_only: ignore 'deck full' (for the close-calls report)."""
         if c["name"] in names or face_keys(c) & taken:
             return "already in (a double-faced card counts once)"
         if not rules_only:
-            if len(picked) >= n_nonland:
+            if len(picked) >= st["limit"]:
                 return "deck full"
             if creature_cap is not None and "creature" in c["tags"] and tagc["creature"] >= creature_cap:
                 return "creature count reached"
@@ -280,8 +296,15 @@ def build(idx, cmd, plan):
             return f"too pricey (${price(c):.0f})"
         if st["spent"] + price(c) > budget:
             return "over budget"
-        if c["game_changer"] and st["gc"] >= max_gc:
-            return "Game Changer limit (Bracket 3)"
+        if c["game_changer"] and st["gc"] >= gc_target:
+            return "Game Changer limit (Bracket 3)" if st["gc"] >= max_gc else "Game Changer target for this vibe reached"
+        power = is_power(c)
+        if power and st["core"]:
+            return "power card: waits until the synergy core is built"
+        if power and not rules_only:
+            t, how = SP.earliest_win(picked + [c], cmd, db)
+            if t < SP.MIN_WIN_TURN:
+                return f"would let the deck win around turn {t:g} ({how}); Bracket 3 aims for turn {SP.MIN_WIN_TURN}+"
         for t, capn in tag_caps.items():
             if t in c["tags"] and tagc[t] >= capn:
                 return f"{t.replace('_', ' ')} limit for this vibe"
@@ -295,13 +318,16 @@ def build(idx, cmd, plan):
 
     def fill(cands, pred, have, target, step, reason, creature_cap=cap):
         for c in cands:
-            if have() >= target or len(picked) >= n_nonland:
+            if have() >= target or len(picked) >= st["limit"]:
                 return
             if pred(c):
                 try_add(c, step, reason(c), creature_cap=creature_cap)
 
     def short(c):
         return c["_syn_why"] or c["_th_why"] or "solid card"
+
+    reserve = (gc_target + min(vibe["max_tutors"], 2) + (2 * vibe["combo_slots"] if db and "combos" not in avoid else 0))
+    st["limit"] = n_nonland - reserve
 
     # 1. cards you demanded
     for n in plan["must"]:
@@ -312,17 +338,6 @@ def build(idx, cmd, plan):
             try_add(c, "You asked for it", "must-include", force=True)
         else:
             warnings.append(f"Must-include card unavailable, off-color, or a land: {n}")
-
-    # 2. Game Changers: the ones that help THIS deck most, up to the vibe's target
-    def gc_key(x):
-        roles = E.assess(x)["roles"]
-        value = 12 if set(roles) & {"draw", "removal", "counter", "protection", "sweeper"} else 0   # card advantage / interaction first
-        return -(x["_s"] + 0.5 * x["_q"] + value + 0.5 * min(x["_syn"], 40))
-    gcs = sorted((x for x in nonland if x["game_changer"] and gc_ok(x)), key=gc_key)
-    for c in gcs:
-        if st["gc"] >= gc_target:
-            break
-        try_add(c, "Game Changer", f"{E.describe(c)}" + (f"; fits {c['_syn_why']}" if c["_syn_why"] else ""))
 
     # 3. role quotas: vibe defaults adjusted by what the commander already does
     quotas = dict(vibe["quotas"])
@@ -372,6 +387,16 @@ def build(idx, cmd, plan):
              lambda pl=p: planc[pl["name"]], target, "Enable the finisher" if p.get("finisher") else "Ability support",
              lambda c, pl=p: f"{pl['name']} ({pl['why'][0][:60]}): {E.describe(c)}")
 
+    # 4-a. cards that COUNT for the commander's condition ("creatures with power 2 or less", "with defender"...)
+    conds = profile.get("conditions") or []
+    for r in conds:
+        if not r["strong"] and not CN.counts_creatures([r]):
+            continue
+        target = 22 if r["type"] in ("creature", "token") else 14
+        ok = lambda c, r=r: CN.judge(c, r)[0] in ("meets", "makes") and c["_q"] >= 30
+        fill(nonland, ok, lambda ok=ok: sum(1 for x in picked if ok(x)), target, "Counts for the commander",
+             lambda c, r=r: f"{CN.judge(c, r)[1]}: {E.describe(c)}")
+
     # 4-b. numeric requirement of the winning ability ('Tap ten untapped Elves'): run enough of them
     role = profile.get("role") or {}
     req = role.get("requires")
@@ -396,11 +421,52 @@ def build(idx, cmd, plan):
          lambda: sum(1 for x in picked if A.is_wincon(x)), win_target, "Win condition",
          lambda c: f"{A.is_wincon(c)}: {E.describe(c)}")
 
-    # 4a. combos (Commander Spellbook): only ones this vibe allows, that run through the commander or its plan
-    db = COMBO_DB
-    no_combos = "combos" in avoid
-    max_tag = "E" if no_combos else vibe["combo_max"]          # never above S: Ruthless (R) is Bracket 4
-    combos_added, combos_removed = [], []
+    # 4b. enough creatures for the plan (a voltron or spells deck still needs blockers and bodies)
+    floor = max(8, min(cap - 4, round(0.75 * (profile["creatures"] or 26)))) if not plan["max_creatures"] else 0
+    if any(p in top_plans[:1] for p in ("Spellslinger (instants & sorceries)",)):
+        floor = min(floor, 10)
+    if any(p in top_plans[:1] for p in ("Voltron / equipment & auras", "Superfriends (planeswalkers)", "Enchantments", "Artifacts")):
+        floor = min(floor, 12)
+    floor = max(floor, min(req_floor, cap))
+    fill(nonland, lambda c: "creature" in c["tags"], lambda: tagc["creature"], floor, "Creature base",
+         lambda c: lambda_reason(c))
+
+    # 5. the vibe's signature slots (picked by score, so on-plan versions win)
+    for slot, need in vibe["slots"].items():
+        fill(nonland, lambda c, s=slot: s in O.vibe_tags(c), lambda s=slot: vtc[s], need,
+             "Vibe", lambda c, s=slot: f"{s} ({plan['vibe_label'].split(':')[0]}): {E.describe(c)}")
+
+    # 6. your themes (mechanical first, narrative is a softer nudge)
+    heavy = bool(tribe)
+    if mech:
+        fill(nonland, lambda c: O.mech_score(c, mech) > 0, lambda: st["mech"], 14 if heavy else 18,
+             "Your theme", lambda c: f"{mech}: {E.describe(c)}")
+    if narr:
+        fill(nonland, lambda c: O.narr_score(c, narr) >= 2, lambda: st["narr"], 7 if (heavy or mech) else 10,
+             "Your theme", lambda c: f"{narr}: {E.describe(c)}")
+
+    # 7. tribe members (only when a tribe is in play)
+    if tribe:
+        tcount = plan["tribe_count"] or (22 if plan["tribe_mode"] == "explicit" else 14)
+        fill(nonland, lambda c: is_member(c, tribe), lambda: st["members"], tcount,
+             "Tribe", lambda c: f"{tribe}: {E.describe(c)}")
+
+    # ---- POWER STAGE: the synergy core is done; now Game Changers, combos, tutors and fast mana may join,
+    #      each only if the deck still can't win before turn 6
+    st["core"] = False
+    st["limit"] = n_nonland
+    # P1. Game Changers: the ones that help THIS deck most, up to the vibe's target
+    def gc_key(x):
+        roles = E.assess(x)["roles"]
+        value = 12 if set(roles) & {"draw", "removal", "counter", "protection", "sweeper"} else 0   # card advantage / interaction first
+        return -(x["_s"] + 0.5 * x["_q"] + value + 0.5 * min(x["_syn"], 40))
+    gcs = sorted((x for x in nonland if x["game_changer"] and gc_ok(x)), key=gc_key)
+    for c in gcs:
+        if st["gc"] >= gc_target:
+            break
+        try_add(c, "Game Changer", f"{E.describe(c)}" + (f"; fits {c['_syn_why']}" if c["_syn_why"] else ""))
+
+    # P2. combos (Commander Spellbook): only ones this vibe allows, that run through the commander or its plan
     cmd_l = cmd["name"].lower()
     by_name = {c["name"].lower(): c for c in nonland}
     for c in nonland:
@@ -432,39 +498,11 @@ def build(idx, cmd, plan):
             new = [x for x in pc if x["name"] not in names]
             if len(picked) + len(new) > n_nonland or any(blocked(x) for x in new):
                 continue
+            if SP.earliest_win(picked + new, cmd, db)[0] < SP.MIN_WIN_TURN:   # too fast for Bracket 3
+                continue
             for x in new:
                 add(x, "Combo", f"{K.describe(k)} [{K.TAG_NAMES.get(k['tag'], k['tag'])}]")
             combos_added.append(k)
-
-    # 4b. enough creatures for the plan (a voltron or spells deck still needs blockers and bodies)
-    floor = max(8, min(cap - 4, round(0.75 * (profile["creatures"] or 26)))) if not plan["max_creatures"] else 0
-    if any(p in top_plans[:1] for p in ("Spellslinger (instants & sorceries)",)):
-        floor = min(floor, 10)
-    if any(p in top_plans[:1] for p in ("Voltron / equipment & auras", "Superfriends (planeswalkers)", "Enchantments", "Artifacts")):
-        floor = min(floor, 12)
-    floor = max(floor, min(req_floor, cap))
-    fill(nonland, lambda c: "creature" in c["tags"], lambda: tagc["creature"], floor, "Creature base",
-         lambda c: lambda_reason(c))
-
-    # 5. the vibe's signature slots (picked by score, so on-plan versions win)
-    for slot, need in vibe["slots"].items():
-        fill(nonland, lambda c, s=slot: s in O.vibe_tags(c), lambda s=slot: vtc[s], need,
-             "Vibe", lambda c, s=slot: f"{s} ({plan['vibe_label'].split(':')[0]}): {E.describe(c)}")
-
-    # 6. your themes (mechanical first, narrative is a softer nudge)
-    heavy = bool(tribe)
-    if mech:
-        fill(nonland, lambda c: O.mech_score(c, mech) > 0, lambda: st["mech"], 14 if heavy else 18,
-             "Your theme", lambda c: f"{mech}: {E.describe(c)}")
-    if narr:
-        fill(nonland, lambda c: O.narr_score(c, narr) >= 2, lambda: st["narr"], 7 if (heavy or mech) else 10,
-             "Your theme", lambda c: f"{narr}: {E.describe(c)}")
-
-    # 7. tribe members (only when a tribe is in play)
-    if tribe:
-        tcount = plan["tribe_count"] or (22 if plan["tribe_mode"] == "explicit" else 14)
-        fill(nonland, lambda c: is_member(c, tribe), lambda: st["members"], tcount,
-             "Tribe", lambda c: f"{tribe}: {E.describe(c)}")
 
     # 8. fill the rest by overall score, without letting any one theme take over
     def over_cap(c):
@@ -516,6 +554,26 @@ def build(idx, cmd, plan):
                 if not makes_bad:
                     add(c, "Best remaining fit", lambda_reason(c) + f" (replaces {victim['name']}, see combo check)")
                     break
+
+    # 10. speed check: a Bracket 3 deck shouldn't be able to win before turn 6. Cut the cards that make it faster
+    #     (power cards or pieces of the fastest combo), lowest-scoring first, and refill with synergy cards.
+    for _ in range(12):
+        t, how = SP.earliest_win(picked, cmd, db)
+        if t >= SP.MIN_WIN_TURN:
+            break
+        cands = [c for c in picked if c["name"].lower() not in must_names
+                 and (is_power(c) or (how.startswith("a combo") and c["name"].lower() in how.lower()))]
+        if not cands:
+            warnings.append(f"This deck may win around turn {t:g} ({how}) because of cards you asked for.")
+            break
+        victim = min(cands, key=lambda c: c["_s"])
+        remove(victim)
+        warnings.append(f"Cut {victim['name']}: with it the deck could win around turn {t:g} ({how}); Bracket 3 aims for turn {SP.MIN_WIN_TURN}+.")
+        for c in nonland:
+            if c is not victim and not is_power(c) and not blocked(c, creature_cap=cap):
+                add(c, "Best remaining fit", lambda_reason(c) + f" (replaces {victim['name']}, see speed check)")
+                break
+    speed = SP.earliest_win(picked, cmd, db)
 
     # ---- lands (prices never count against the budget; see lands.py for the house rules)
     for c in pool:
@@ -604,7 +662,7 @@ def build(idx, cmd, plan):
                 nonbasic=len(nonbasic), land_pool=land_info["candidates"], warnings=warnings, land_cost=land_cost,
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
-                wincons=[c["name"] for c in picked if A.is_wincon(c)],
+                wincons=[c["name"] for c in picked if A.is_wincon(c)], speed=dict(turn=speed[0], how=speed[1]),
                 profile=profile, vibe_match=vmatch, natural_vibe=natural, report=report, edged=edged, combos=combo_info,
                 validation=problems)
 
@@ -792,7 +850,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 

@@ -93,6 +93,10 @@ def main():
     if role:
         label = {"finisher": "Finisher", "engine": "Engine", "value": "Value piece"}[role["role"]]
         A(f"**The commander's role: {label}.** {role['note']}")
+        if p.get("speed"):
+            sp = p["speed"]
+            A(f"Estimated earliest win: **turn {sp['turn']:g}** ({sp['how']}). Bracket 3 aims for turn 6-8, so Game Changers, "
+              f"tutors, fast mana and combos were only added after the synergy core was built, and only if they kept it there.")
         if p.get("wincons") is not None:
             A(f"Win conditions in the 99: {len(p['wincons'])}" + (f" ({', '.join(p['wincons'][:8])})" if p["wincons"] else "") + ".")
         A("")
