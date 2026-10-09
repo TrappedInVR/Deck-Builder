@@ -260,6 +260,108 @@ def _self_name_free(cmd):
     return x
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Commander role: is the commander's OWN ability how the deck wins (finisher), or is it an engine that needs
+# separate win conditions, or a value piece with no engine at all?
+_N = r"(?:\d+|x|that much|half (?:their|his or her) life)"
+FINISH = [  # (label, pattern) read on the commander's text, and on cards when looking for win conditions
+    ("drains the table", r"\beach opponent loses (?:\d+|x|that much|life equal|half)"),
+    ("drains the table", r"\btarget opponent loses (?:[3-9]|\d\d|x|that much|life equal|half)"),
+    ("damages every opponent", r"deals? (?:\d+|x|that much|damage equal to [^.]{0,40}) (?:damage )?to each opponent"),
+    ("damages every opponent", r"deals? (?:[3-9]|\d\d|x|that much) damage to (?:target|that) (?:player|opponent)"),
+    ("wins the game outright", r"\byou win the game\b"),
+    ("takes extra combats", r"\badditional combat phase\b"),
+    ("poisons opponents", r"\binfect\b|\btoxic \d|\bpoison counters?\b"),
+    ("pumps the whole team (overrun)", r"creatures you control (?:get|gain) \+(?:[2-9]|x)/\+(?:\d|x)[^.]{0,40}(?:trample|until end of turn)|"
+                                       r"creatures you control gain trample and get \+(?:[2-9]|x)"),
+    ("doubles damage", r"deals? double that damage|\bdouble (?:the )?damage\b|deals twice that much damage"),
+]
+_FINISH_RX = [(lbl, re.compile(r, re.I)) for lbl, r in FINISH]
+_CARD_POISON = re.compile(r"\binfect\b|\btoxic \d", re.I)
+_WORDS = dict(one=1, two=2, three=3, four=4, five=5, six=6, seven=7, eight=8, nine=9, ten=10, eleven=11, twelve=12,
+              thirteen=13, fourteen=14, fifteen=15, twenty=20, thirty=30, forty=40, fifty=50, hundred=100)
+_REQ = [re.compile(r"\btap (\w+) untapped (\w+?)(?: creatures)? you control", re.I),
+        re.compile(r"\bif you control (\w+) or more (\w+)", re.I),
+        re.compile(r"\b(\w+) or more (\w+?)(?: creatures)? you control", re.I),
+        re.compile(r"\bsacrifice (\w+) (\w+)", re.I)]
+
+
+def _count(word):
+    w = word.lower()
+    return int(w) if w.isdigit() else _WORDS.get(w)
+
+
+def _noun_type(noun):
+    """'Elves' -> 'Elf', 'creatures' -> 'creature', 'artifacts' -> 'artifact'; None if not a type."""
+    n = noun.strip().lower()
+    for cand in (n, n[:-1], n[:-2], n[:-3] + "f", n[:-3] + "y", n[:-3]):
+        if not cand:
+            continue
+        for t in ALL_TYPES:
+            if t.lower() == cand:
+                return t
+        if cand in ("creature", "artifact", "enchantment", "land", "permanent", "token", "planeswalker"):
+            return cand
+    return None
+
+
+def _negated(text, start):
+    return bool(CX._NEG_BEFORE.search(text[:start][-40:].lower()))
+
+
+def commander_role(cmd, routes=()):
+    """finisher / engine / value, with the ability that wins and any numeric requirement it has.
+    finisher: the commander's own ability ends the game (drain, burn the table, 'you win', extra combats, infect,
+              team pump, damage doubling) or it is a big evasive body (commander damage)
+    engine:   it has a game plan but needs other cards to actually close the game
+    value:    no engine in its text"""
+    x = _self_name_free(cmd)
+    how, lines, req = [], [], None
+    for line in x.split("\n"):
+        for lbl, rx in _FINISH_RX:
+            m = rx.search(line)
+            if m and not _negated(line, m.start()) and lbl not in how:
+                how.append(lbl)
+                if line not in lines:
+                    lines.append(line)
+    for line in lines:
+        for rx in _REQ:
+            m = rx.search(line)
+            if m and _count(m.group(1)) and _noun_type(m.group(2)):
+                req = dict(count=_count(m.group(1)), type=_noun_type(m.group(2)), noun=m.group(2), text=m.group(0))
+                break
+        if req:
+            break
+    names = [r["name"] for r in routes]
+    if "Voltron / equipment & auras" in names[:2]:
+        how.append("commander damage (big evasive body)")
+    if how:
+        role = "finisher"
+        note = (f"Its own ability is a win condition ({', '.join(how)}), so the deck is built to ENABLE it: extra cards "
+                f"that trigger, fuel and protect it, and fewer stand-alone win conditions.")
+        if req:
+            note += f" It needs {req['count']} {req['noun']} ('{req['text']}'), so the deck runs {req['count'] + 4}+ of them."
+    elif routes:
+        role, note = "engine", ("It is an engine, not a finisher: it generates value, so the deck adds dedicated win conditions "
+                                "(team pumps, drains, extra combats, game-ending spells) to turn that value into a win.")
+    else:
+        role, note = "value", "It has no engine of its own, so the deck leans on its themes and carries extra win conditions."
+    return dict(role=role, how=how, lines=lines, requires=req, note=note)
+
+
+def is_wincon(card):
+    """A card that ends games on its own or with a board: drains, table burn, 'you win', extra combats, overruns,
+    damage doublers. Poison only counts in a poison deck (handled by the plan)."""
+    x = card.get("text") or ""
+    for lbl, rx in _FINISH_RX:
+        if lbl == "poisons opponents":
+            continue
+        m = rx.search(x)
+        if m and not _negated(x, m.start()):
+            return lbl
+    return ""
+
+
 _TYPE_RX = {}
 
 
@@ -441,10 +543,25 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
     routes = [dict(name=n, base=round(min(w, 10), 1), style=PLAN_STYLE.get(n), why=sorted(set(why), key=len)[:3]) for n, w, why in ordered[:8]]
     for r in routes:
         r["weight"] = _vibe_shift(r["base"], r["style"], styles)
+    # ONE recognizable plan beats the vibe: if the commander only does one thing (or one plan is 1.8x the next),
+    # that plan leads whatever the vibe; the vibe only re-orders the supporting plans.
+    by_base = sorted(routes, key=lambda r: -r["base"])
+    dominant = by_base[0] if by_base and (len(by_base) == 1 or by_base[0]["base"] >= 1.8 * by_base[1]["base"]) else None
+    if dominant:
+        others = [r["weight"] for r in routes if r is not dominant]
+        dominant["weight"] = round(max(dominant["weight"], dominant["base"], (max(others) + 0.1) if others else 0), 2)
+        dominant["clear"] = True
     routes.sort(key=lambda r: -r["weight"])
     out = [dict(name=r["name"], weight=r["weight"], why=r["why"], style=r["style"]) for r in routes[:6]]
     lead_note = ""
-    if routes and styles:
+    if dominant:
+        pref = max(styles, key=styles.get) if styles else None
+        if pref and pref != dominant.get("style") and styles.get(dominant.get("style") or "", 0) < styles[pref]:
+            lead_note = (f"This commander has one clear game plan, {dominant['name']}, so it leads even though your vibe "
+                         f"prefers {pref} plans; the vibe shapes the supporting cards instead.")
+        else:
+            lead_note = f"This commander has one clear game plan, {dominant['name']}, and the deck is built around it."
+    elif routes and styles:
         natural = max(routes, key=lambda r: r["base"])
         if natural["name"] != routes[0]["name"]:
             lead_note = (f"This commander can be played several ways. Its most obvious plan is {natural['name']}, "
@@ -458,8 +575,19 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
     for p in inter:
         p["base"] = p["weight"]
         p["weight"] = _vibe_shift(p["weight"], p["style"], styles)
+    role = commander_role(cmd, routes)
+    if role["role"] == "finisher":
+        fin = [ln.lower() for ln in role["lines"]]
+        for p in inter:
+            # interactions that come from the winning ability: enable it harder (bigger weight, more cards)
+            if any(w.rstrip(".").lower()[:40] in ln for w in p["why"] for ln in fin) or not fin:
+                p["weight"] = round(min(p["weight"] * 1.6, 10), 2)
+                p["finisher"] = True
+        if is_creature:
+            adjust["protection"] = min(adjust.get("protection", 0) + 2, 6)
+            notes.append("Its ability wins the game, so it gets extra protection: losing it means losing the win condition.")
     inter.sort(key=lambda p: -p["weight"])
-    return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8],
+    return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8], role=role,
                 abilities=[dict(kind=a["kind"], text=a["text"], event=a["event"][1] if a["event"] else None,
                                 costs=[c[1] for c in a["costs"]], outputs=[o[1] for o in a["outputs"]], style=a["style"])
                            for a in parsed],

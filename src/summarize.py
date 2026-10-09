@@ -89,6 +89,13 @@ def main():
     for n in prof.get("notes", []):
         A(f"- {n}")
     A("")
+    role = prof.get("role") or {}
+    if role:
+        label = {"finisher": "Finisher", "engine": "Engine", "value": "Value piece"}[role["role"]]
+        A(f"**The commander's role: {label}.** {role['note']}")
+        if p.get("wincons") is not None:
+            A(f"Win conditions in the 99: {len(p['wincons'])}" + (f" ({', '.join(p['wincons'][:8])})" if p["wincons"] else "") + ".")
+        A("")
     abil = [a for a in prof.get("abilities", []) if a["kind"] != "keyword"]
     if abil:
         A("**Its abilities, one by one:**")
@@ -100,7 +107,7 @@ def main():
         A("")
     routes = prof.get("routes") or []
     if len(routes) > 1:
-        A("**Ways to play this commander** (the vibe picks the lead, the rest stay in as support):")
+        A("**Ways to play this commander** (the vibe picks the lead unless one plan clearly dominates; the rest stay in as support):")
         A("")
         A("| Game plan | Style | From the card | After your vibe |\n|---|---|---|---|")
         for i, r in enumerate(routes[:6]):

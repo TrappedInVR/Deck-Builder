@@ -25,7 +25,7 @@ import evaluate as E
 import lands as L
 import options as O
 import validate as V
-from common import load_cards, pips
+from common import face_keys, load_cards, pips
 
 BASICS = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
 BASIC_TYPES = (("Plains", "W"), ("Island", "U"), ("Swamp", "B"), ("Mountain", "R"), ("Forest", "G"))
@@ -220,6 +220,7 @@ def build(idx, cmd, plan):
         opts = [v for v in (profile["creatures"], O.MECH_MAX_CREATURES.get(mech)) if v]
         cap = round(sum(opts) / len(opts)) if opts else O.DEFAULT_MAX_CREATURES
     picked, names, why = [], set(), {}
+    taken = set(face_keys(cmd))           # every face name already in the deck (commander included)
     st = dict(spent=0.0, gc=1 if cmd["game_changer"] else 0, mech=0, narr=0, members=0, onplan=0)
     tagc, vtc, planc = Counter(), Counter(), Counter()
     per_card_cap = max(5.0, budget * 0.10)
@@ -232,6 +233,7 @@ def build(idx, cmd, plan):
     def add(c, step, reason):
         picked.append(c)
         names.add(c["name"])
+        taken.update(face_keys(c))
         why[c["name"]] = (step, reason)
         st["spent"] += price(c)
         st["gc"] += c["game_changer"]
@@ -248,6 +250,8 @@ def build(idx, cmd, plan):
     def remove(c):
         picked.remove(c)
         names.discard(c["name"])
+        taken.difference_update(face_keys(c))
+        taken.update(face_keys(cmd))
         why.pop(c["name"], None)
         st["spent"] -= price(c)
         st["gc"] -= c["game_changer"]
@@ -263,8 +267,8 @@ def build(idx, cmd, plan):
 
     def blocked(c, creature_cap=None, force=False, rules_only=False):
         """Why a card can't go in right now ('' = it can). rules_only: ignore 'deck full' (for the close-calls report)."""
-        if c["name"] in names:
-            return "already in"
+        if c["name"] in names or face_keys(c) & taken:
+            return "already in (a double-faced card counts once)"
         if not rules_only:
             if len(picked) >= n_nonland:
                 return "deck full"
@@ -362,9 +366,35 @@ def build(idx, cmd, plan):
         if p["weight"] < 1.5:
             continue
         target = 6 if p["kind"] in ("enabler", "fuel") else 4
+        if p.get("finisher"):
+            target += 2                     # the commander IS the win condition: enable it harder
         fill(nonland, lambda c, pl=p: A.interaction_hits(c, pl) > 0 and c["_q"] >= 35,
-             lambda pl=p: planc[pl["name"]], target, "Ability support",
+             lambda pl=p: planc[pl["name"]], target, "Enable the finisher" if p.get("finisher") else "Ability support",
              lambda c, pl=p: f"{pl['name']} ({pl['why'][0][:60]}): {E.describe(c)}")
+
+    # 4-b. numeric requirement of the winning ability ('Tap ten untapped Elves'): run enough of them
+    role = profile.get("role") or {}
+    req = role.get("requires")
+    req_floor = 0
+    if req:
+        need = req["count"] + 4
+        t = req["type"]
+        if t == "creature":
+            req_floor = need
+        else:
+            if t in ("artifact", "enchantment", "planeswalker"):
+                member = lambda c, t=t: t.title() in c["type_line"]
+            else:
+                member = lambda c, t=t: is_member(c, t)
+            fill(nonland, member, lambda m=member: sum(1 for x in picked if m(x)), need, "Enable the finisher",
+                 lambda c, r=req: f"it needs {r['count']} {r['noun']} ('{r['text']}'): {E.describe(c)}")
+
+    # 4-c. win conditions: an engine/value commander needs cards that turn its advantage into a win;
+    #      a finisher commander keeps a couple as backup in case it's removed
+    win_target = {"finisher": 2, "engine": 4, "value": 5}.get(role.get("role"), 4)
+    fill(nonland, lambda c: bool(A.is_wincon(c)) and c["_q"] >= 30 and (c["_syn"] >= SYN_ON_PLAN or c["_q"] >= 45),
+         lambda: sum(1 for x in picked if A.is_wincon(x)), win_target, "Win condition",
+         lambda c: f"{A.is_wincon(c)}: {E.describe(c)}")
 
     # 4a. combos (Commander Spellbook): only ones this vibe allows, that run through the commander or its plan
     db = COMBO_DB
@@ -412,6 +442,7 @@ def build(idx, cmd, plan):
         floor = min(floor, 10)
     if any(p in top_plans[:1] for p in ("Voltron / equipment & auras", "Superfriends (planeswalkers)", "Enchantments", "Artifacts")):
         floor = min(floor, 12)
+    floor = max(floor, min(req_floor, cap))
     fill(nonland, lambda c: "creature" in c["tags"], lambda: tagc["creature"], floor, "Creature base",
          lambda c: lambda_reason(c))
 
@@ -490,8 +521,9 @@ def build(idx, cmd, plan):
     for c in pool:
         if "land" in c["tags"]:
             c["_lsyn"], _ = A.synergy(c, profile)
-    chosen_lands, land_info = L.choose(pool, ident, lands, synergy=lambda c: c.get("_lsyn", 0),
-                                       popularity=CM.popularity, max_nonbasic=plan["max_nonbasic"])
+    chosen_lands, land_info = L.choose([c for c in pool if not (face_keys(c) & taken)], ident, lands,
+                                       synergy=lambda c: c.get("_lsyn", 0), popularity=CM.popularity,
+                                       max_nonbasic=plan["max_nonbasic"])
     nonbasic = [c for c, _ in chosen_lands]
     st["gc"] += sum(c["game_changer"] for c in nonbasic)
     land_cost = sum(price(c) for c in nonbasic)
@@ -572,6 +604,7 @@ def build(idx, cmd, plan):
                 nonbasic=len(nonbasic), land_pool=land_info["candidates"], warnings=warnings, land_cost=land_cost,
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
+                wincons=[c["name"] for c in picked if A.is_wincon(c)],
                 profile=profile, vibe_match=vmatch, natural_vibe=natural, report=report, edged=edged, combos=combo_info,
                 validation=problems)
 
@@ -759,7 +792,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 

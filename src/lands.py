@@ -154,6 +154,7 @@ def choose(pool, ident, lands, synergy=lambda c: 0, popularity=lambda c: 0, max_
     rows.sort(key=lambda r: r[:5])
     target = nonbasic_target(len(ident), lands) if max_nonbasic is None else min(max_nonbasic, lands - 8)
     chosen, tapped, utility = [], 0, 0
+    seen_faces = set()
     anyc = 0
     for tier, _, _, _, _, c, kind in rows:
         if len(chosen) >= target:
@@ -171,6 +172,10 @@ def choose(pool, ident, lands, synergy=lambda c: 0, popularity=lambda c: 0, max_
             if utility >= (4 if len(ident) <= 1 else 2) or (synergy(c) <= 0 and popularity(c) < 12):
                 continue
             utility += 1
+        faces = {c["name"].lower()} | {f.strip().lower() for f in c["name"].split(" // ")}
+        if faces & seen_faces:
+            continue                       # pathways & co.: one physical card, never twice
+        seen_faces |= faces
         chosen.append((c, kind))
     kinds = {}
     for c, kind in chosen:

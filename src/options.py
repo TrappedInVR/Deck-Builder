@@ -91,7 +91,7 @@ VIBES = {
         avoid=set(),
         personality=dict(power=2.0, engine=1.0, mean=0.6, pressure=0.3, gentle=-0.2, chaos=-0.5),
         blurb="As strong as Bracket 3 allows: 3 Game Changers, efficient staples and tutors. "
-              "Check two-card combos yourself (Commander Spellbook) to stay in Bracket 3."),
+              "Known early two-card wins are swapped out automatically to stay in Bracket 3."),
 }
 VIBE_LABELS = list(VIBES)
 DEFAULT_VIBE = "Competitive-Casual: Win and Have a Good Time"
@@ -376,3 +376,31 @@ def explain(card, mech, narr):
 PICK_MODES = ["Best match", "Random from top 10 matches"]
 OLD_MECH_NAMES = {"Blink & Value": "Blink & Enter-the-Battlefield", "Treasure & Clues": "Treasure, Clues & Food",
                   "Draw, Wheels & Discard": "Card Draw & Wheels"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+SLOT_NAMES = dict(grouphug="group-hug cards (everyone draws/gains)", politics="politics (monarch, vote, goad)",
+                  chaos="chaos cards (coin flips, swaps, random)", punish="punisher cards (opponents lose life/sacrifice/discard)",
+                  stax="stax pieces (taxes, 'can't' effects)", fastmana="fast mana")
+COMBO_NAMES = dict(E="none", C="casual/late-game only", O="up to Oddball", P="up to Powerful (late, multi-card)",
+                   S="up to Spicy (strong, but never early two-card wins)")
+
+
+def vibe_criteria_md():
+    """The vibe table for the README (python -c 'import options; print(options.vibe_criteria_md())')."""
+    def top(d, n=3, pos=True):
+        items = sorted(((k, v) for k, v in d.items() if (v > 0) == pos and v), key=lambda kv: -abs(kv[1]))
+        return ", ".join(k for k, _ in items[:n]) or "-"
+    rows = ["| Vibe | What it feels like | Commanders it picks | Plans it leads with | Game Changers | Tutors / extra turns | "
+            "Combos | Ramp / draw / removal / counters / wipes / recursion | Signature cards | Never includes | Lands |",
+            "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for k, v in VIBES.items():
+        q = v["quotas"]
+        slots = "; ".join(f"{n} {SLOT_NAMES.get(s, s)}" for s, n in v["slots"].items()) or "-"
+        combos = "none" if not v["combo_slots"] else f"{v['combo_slots']} built in ({COMBO_NAMES[v['combo_max']]})"
+        rows.append(f"| **{k}** | {v['blurb']} | {top(v['personality'])} (not {top(v['personality'], 2, False)}) | "
+                    f"{top(v['styles'])} (not {top(v['styles'], 2, False)}) | aims for {v['gc_target']} (max 3) | "
+                    f"{v['max_tutors']} / {v['max_extra_turns']} | {combos} | "
+                    f"{q['ramp']} / {q['draw']} / {q['removal']} / {q['counter']} / {q['sweeper']} / {q['recursion']} | {slots} | "
+                    f"{', '.join(sorted(v['avoid'])) or '-'} | {v['lands']} |")
+    return "\n".join(rows)

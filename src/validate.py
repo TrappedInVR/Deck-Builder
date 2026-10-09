@@ -4,7 +4,7 @@ can't hide behind one commander.
 
 Rules
   1. exactly 100 MAIN-DECK cards (Attractions, sticker sheets and cards that need them never count or get added)
-  2. singleton (basics and "any number" cards excepted)
+  2. singleton (basics and "any number" cards excepted); a double-faced card is ONE card, whichever face is listed
   3. every card in the commander's color identity and Commander-legal (present in the card data)
   4. land count = the vibe's land target, counting EVERY land-type card (artifact lands included)
   5. no card that needs a color/basic type the deck can't have
@@ -15,7 +15,7 @@ import re
 
 import combos as K
 import lands as L
-from common import main_deck_card
+from common import face_keys, main_deck_card
 
 ANY_NUMBER = re.compile(r"a deck can have any number of cards named", re.I)
 
@@ -65,6 +65,18 @@ def check(idx, lines, cmd, plan, combo_db=None, max_tag="S", off_color=None):
         if c is not cmd:
             xt += n * ("extra_turn" in c["tags"])
             tut += n * ("tutor" in c["tags"])
+    # a double-faced card is ONE card: listing it twice under different face names is still two copies
+    seen = {}
+    for n, name in deck:
+        c = idx.get(name.lower())
+        if c is None or "Basic" in c["type_line"] or ANY_NUMBER.search(c.get("text") or ""):
+            continue
+        for f in face_keys(c):
+            if f in seen and seen[f] != name:
+                problems.append(f"{name} and {seen[f]} are the same card ({c['name']}); a double-faced card counts once")
+                break
+        for f in face_keys(c):
+            seen.setdefault(f, name)
     if len(tapped_lands) > L.MAX_TAPPED:
         problems.append(f"{len(tapped_lands)} tapped lands (max {L.MAX_TAPPED}): {', '.join(tapped_lands)}")
     if lands != plan["lands"]:

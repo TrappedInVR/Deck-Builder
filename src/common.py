@@ -26,14 +26,26 @@ def main_deck_card(c):
         and c.get("layout") not in NOT_MAIN_LAYOUTS
 
 
+def face_keys(c_or_name):
+    """Every name a card answers to: 'Valki, God of Lies // Tibalt, Cosmic Impostor' -> {full, 'valki, god of lies',
+    'tibalt, cosmic impostor'}. A double-faced card is ONE card: two entries sharing any face are the same card."""
+    name = c_or_name["name"] if isinstance(c_or_name, dict) else c_or_name
+    n = name.strip().lower()
+    return {n} | {f.strip() for f in n.split(" // ") if f.strip()}
+
+
 def load_cards(path="data/cards.json"):
     """Return {lowercase name: card}. Double-faced cards are also indexed by front face."""
     with open(path, encoding="utf-8") as f:
         cards = json.load(f)
     idx = {}
+    # faces of double-faced/split cards: a separate entry with the same name as a face is the SAME card -> skip it
+    multi_faces = {f for c in cards if " // " in c["name"] for f in face_keys(c)} - {c["name"].lower() for c in cards if " // " in c["name"]}
     for c in cards:
         if not main_deck_card(c):
             continue                          # Attractions, sticker sheets & co. never go in the 99
+        if " // " not in c["name"] and c["name"].lower() in multi_faces:
+            continue                          # it's a face of a double-faced card that is already listed
         if "_reminder_stripped" not in c:
             # reminder text "(It's an artifact with ... Add one mana ...)" would fool the rules, so drop it
             c["text"] = re.sub(r" ?\([^()]*\)", "", c.get("text") or "").strip()
@@ -41,7 +53,8 @@ def load_cards(path="data/cards.json"):
         c["tags"] = tag(c)                    # re-tag on load: rule fixes apply even to yesterday's cached download
         idx[c["name"].lower()] = c
         if " // " in c["name"]:
-            idx.setdefault(c["name"].split(" // ")[0].lower(), c)
+            for f in face_keys(c):            # either face's name finds the same (single) card
+                idx.setdefault(f, c)
     return idx
 
 def parse_deck(path):
