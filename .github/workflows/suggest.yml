@@ -6,18 +6,18 @@ on:
   workflow_dispatch:
     inputs:
       vibe:
-        description: "Deck vibe: sets the bracket, power, and how mean or chaotic the deck is. Applies even if you type a commander."
+        description: "Deck vibe: the deck's personality (every vibe is Bracket 3). Mean vibes pick mean commanders. Applies even if you type a commander."
         required: false
         type: choice
-        default: "Competitive-Casual: Win and Have a Good Time (Bracket 3)"
+        default: "Competitive-Casual: Win and Have a Good Time"
         options:
-          - "Relaxed Casual (Bracket 2)"
-          - "Social Table: Fun for Everyone (Bracket 2)"
-          - "Competitive-Casual: Win and Have a Good Time (Bracket 3)"
-          - "Chaos & Memes: Chaotic Fun (Bracket 3)"
-          - "Table Threat: Scary to Play Against (Bracket 3)"
-          - "Hostile Control: Stax & Hate (Bracket 4)"
-          - "Optimized Menace: High Power (Bracket 4)"
+          - "Relaxed Casual"
+          - "Social Table: Fun for Everyone"
+          - "Competitive-Casual: Win and Have a Good Time"
+          - "Chaos & Memes: Chaotic Fun"
+          - "Table Threat: Scary to Play Against"
+          - "Hostile Control: Stax & Hate"
+          - "Optimized Menace: Max-Power Bracket 3"
       colors:
         description: "Colors (exact color identity). Ignored if you type a commander."
         required: false
@@ -125,9 +125,15 @@ jobs:
       - uses: actions/cache@v4            # one Scryfall download per day, reused across runs
         with:
           path: data/cards.json
-          key: cards-v2-${{ steps.day.outputs.d }}
+          key: cards-v3-${{ steps.day.outputs.d }}
       - name: Fetch Scryfall data (skipped if cached today)
         run: test -s data/cards.json || python src/fetch_cards.py
+      - uses: actions/cache@v4            # Commander Spellbook combo database, once per day
+        with:
+          path: data/combos.json
+          key: combos-v1-${{ steps.day.outputs.d }}
+      - name: Fetch combo data from Commander Spellbook (skipped if cached today; never fails the run)
+        run: test -s data/combos.json || python src/fetch_combos.py
       - name: Find commanders that fit
         run: >
           python src/build_deck.py --suggest-only --vibe "$VIBE" --colors "$COLORS" --mech "$MECH"
