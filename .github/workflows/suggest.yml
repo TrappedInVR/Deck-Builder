@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       vibe:
-        description: "Deck vibe: the deck's personality (every vibe is Bracket 3). Mean vibes pick mean commanders. Applies even if you type a commander."
+        description: "1. Vibe: how the deck feels to play against. Every vibe is Bracket 3."
         required: false
         type: choice
         default: "Competitive-Casual: Win and Have a Good Time"
@@ -19,7 +19,7 @@ on:
           - "Hostile Control: Stax & Hate"
           - "Optimized Menace: Max-Power Bracket 3"
       colors:
-        description: "Colors (exact color identity). Ignored if you type a commander."
+        description: "2. Colors."
         required: false
         type: choice
         default: "Any (no preference)"
@@ -58,31 +58,44 @@ on:
           - "Five-Color (WUBRG)"
           - "Colorless (C)"
       mechanical_theme:
-        description: "Mechanical theme: how the deck plays."
+        description: "3. Mechanical theme (optional): how the deck plays."
         required: false
         type: choice
         default: "Any (no preference)"
         options:
           - "Any (no preference)"
           - "+1/+1 Counters"
-          - "Spellslinger"
           - "Tokens & Go-Wide"
           - "Sacrifice & Aristocrats"
           - "Graveyard & Reanimator"
+          - "Spellslinger"
           - "Artifacts"
           - "Enchantress"
+          - "Equipment & Auras (Voltron)"
           - "Lifegain"
           - "Landfall & Lands Matter"
-          - "Blink & Value"
-          - "Equipment & Auras (Voltron)"
-          - "Treasure & Clues"
+          - "Blink & Enter-the-Battlefield"
+          - "Treasure, Clues & Food"
+          - "Combat & Aggro"
+          - "Big Creatures & Stompy"
           - "Group Slug & Burn"
           - "Group Hug & Politics"
-          - "Combat & Aggro"
-          - "Draw, Wheels & Discard"
-          - "Big Creatures & Stompy"
+          - "Card Draw & Wheels"
+          - "Discard & Madness"
+          - "Cast from Exile & Impulse Draw"
+          - "Steal Your Opponents' Stuff"
+          - "Mill Your Opponents"
+          - "Poison & Proliferate"
+          - "Superfriends (Planeswalkers)"
+          - "Vehicles"
+          - "Clones & Copies"
+          - "Big Spells & X Costs"
+          - "Flash & Instant-Speed"
+          - "Legends Matter"
+          - "Tap & Untap Engines"
+          - "Dice & Coin Flips"
       narrative_theme:
-        description: "Narrative theme: flavor and imagery (creature types, card names, rules and flavor text). A soft nudge."
+        description: "4. Narrative theme (optional): the flavor and story."
         required: false
         type: choice
         default: "Any (no preference)"
@@ -103,8 +116,13 @@ on:
           - "Cosmic Horror & the Void"
           - "Insect Swarm & Hive"
           - "War Hosts (Goblins, Orcs & Warriors)"
+          - "Wild West Outlaws"
+          - "Samurai & Ninjas"
+          - "Frost & Winter"
+          - "Myths & Gods"
+          - "Sun, Moon & Stars"
       tribe:
-        description: "Creature type to emphasize (optional). Blank = tribal ONLY if the commander's own text references its type."
+        description: "5. Creature type(s) to build around (optional), e.g. Elf or Angel/Dragon. Blank = only if the commander supports a type."
         required: false
         default: ""
 jobs:

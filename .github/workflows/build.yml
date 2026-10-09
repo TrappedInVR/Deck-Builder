@@ -4,13 +4,12 @@ name: Build and check a deck
 on:
   workflow_dispatch:
     inputs:
-      randomize:
-        description: "Surprise me: randomizes vibe, colors, and both themes (about 1 in 10 is a tribal deck whose tribe is the commander's own type). Anything you TYPE below is respected; the dropdowns above are ignored."
+      commander:
+        description: "1. Commander (optional). Type a name, even partly or misspelled, and the closest real commander is used. Leave blank to have one picked for you."
         required: false
-        type: boolean
-        default: false
+        default: ""
       vibe:
-        description: "Deck vibe: the deck's personality (every vibe is Bracket 3). Mean vibes pick mean commanders. Applies even if you type a commander."
+        description: "2. Vibe: how the deck feels to play against. Every vibe is Bracket 3."
         required: false
         type: choice
         default: "Competitive-Casual: Win and Have a Good Time"
@@ -23,7 +22,7 @@ on:
           - "Hostile Control: Stax & Hate"
           - "Optimized Menace: Max-Power Bracket 3"
       colors:
-        description: "Colors (exact color identity). Ignored if you type a commander."
+        description: "3. Colors (only used when Commander is blank)."
         required: false
         type: choice
         default: "Any (no preference)"
@@ -62,31 +61,44 @@ on:
           - "Five-Color (WUBRG)"
           - "Colorless (C)"
       mechanical_theme:
-        description: "Mechanical theme: how the deck plays."
+        description: "4. Mechanical theme (optional): how the deck plays."
         required: false
         type: choice
         default: "Any (no preference)"
         options:
           - "Any (no preference)"
           - "+1/+1 Counters"
-          - "Spellslinger"
           - "Tokens & Go-Wide"
           - "Sacrifice & Aristocrats"
           - "Graveyard & Reanimator"
+          - "Spellslinger"
           - "Artifacts"
           - "Enchantress"
+          - "Equipment & Auras (Voltron)"
           - "Lifegain"
           - "Landfall & Lands Matter"
-          - "Blink & Value"
-          - "Equipment & Auras (Voltron)"
-          - "Treasure & Clues"
+          - "Blink & Enter-the-Battlefield"
+          - "Treasure, Clues & Food"
+          - "Combat & Aggro"
+          - "Big Creatures & Stompy"
           - "Group Slug & Burn"
           - "Group Hug & Politics"
-          - "Combat & Aggro"
-          - "Draw, Wheels & Discard"
-          - "Big Creatures & Stompy"
+          - "Card Draw & Wheels"
+          - "Discard & Madness"
+          - "Cast from Exile & Impulse Draw"
+          - "Steal Your Opponents' Stuff"
+          - "Mill Your Opponents"
+          - "Poison & Proliferate"
+          - "Superfriends (Planeswalkers)"
+          - "Vehicles"
+          - "Clones & Copies"
+          - "Big Spells & X Costs"
+          - "Flash & Instant-Speed"
+          - "Legends Matter"
+          - "Tap & Untap Engines"
+          - "Dice & Coin Flips"
       narrative_theme:
-        description: "Narrative theme: flavor and imagery (creature types, card names, rules and flavor text). A soft nudge."
+        description: "5. Narrative theme (optional): the flavor and story."
         required: false
         type: choice
         default: "Any (no preference)"
@@ -107,46 +119,40 @@ on:
           - "Cosmic Horror & the Void"
           - "Insect Swarm & Hive"
           - "War Hosts (Goblins, Orcs & Warriors)"
+          - "Wild West Outlaws"
+          - "Samurai & Ninjas"
+          - "Frost & Winter"
+          - "Myths & Gods"
+          - "Sun, Moon & Stars"
       tribe:
-        description: "Creature type to emphasize (optional). Blank = tribal ONLY if the commander's own text references its type."
-        required: false
-        default: ""
-      pick_mode:
-        description: "When Commander is blank: take the best match, or a random one from the top 10."
-        required: false
-        type: choice
-        default: "Best match"
-        options:
-          - "Best match"
-          - "Random from top 10 matches"
-      commander:
-        description: "Commander (optional, exact card name). Overrides the commander and colors dropdowns. Blank = pick one that fits."
-        required: false
-        default: ""
-      budget:
-        description: "Approx USD budget for the nonland cards, max 500 (blank = 500). Lands never count: dual/shock/fetch lands are always included."
-        required: false
-        default: ""
-      must_include:
-        description: "Cards to force in, separated by semicolons. Example: Sol Ring; Rhystic Study"
-        required: false
-        default: ""
-      exclude:
-        description: "Cards to leave out, separated by semicolons."
+        description: "6. Creature type(s) to build around (optional), e.g. Elf or Angel/Dragon. Blank = only if the commander supports a type."
         required: false
         default: ""
       avoid:
-        description: "Things this deck must never include, comma separated. Options: combos, counterspells, discard, extra turns, fast mana, infect, land destruction, stax, theft, tutors, wipes"
+        description: "7. Never include (optional), comma separated: combos, counterspells, discard, extra turns, fast mana, infect, land destruction, stax, theft, tutors, wipes."
         required: false
         default: ""
+      must_include:
+        description: "8. Cards to always include (optional), separated by ; (e.g. Sol Ring; Rhystic Study)."
+        required: false
+        default: ""
+      exclude:
+        description: "9. Cards to leave out (optional), separated by ;"
+        required: false
+        default: ""
+      budget:
+        description: "10. Budget in $ for the nonland cards (optional, max 500). Lands never count."
+        required: false
+        default: ""
+      randomize:
+        description: "11. Surprise me! Random vibe, colors and themes. Anything you typed above still counts."
+        required: false
+        type: boolean
+        default: false
       seed:
-        description: "Random seed (blank = new each time). Reuse a seed from a past run to reproduce a random result."
+        description: "12. Seed (optional): copy the number from a past run's summary to rebuild the same random deck."
         required: false
         default: ""
-      big_spell:
-        description: "Mana value of your biggest finisher (for the speed estimate)."
-        required: false
-        default: "8"
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -157,14 +163,12 @@ jobs:
       MECH: ${{ inputs.mechanical_theme }}
       NARR: ${{ inputs.narrative_theme }}
       TRIBE: ${{ inputs.tribe }}
-      PICK_MODE: ${{ inputs.pick_mode }}
       COMMANDER: ${{ inputs.commander }}
       BUDGET: ${{ inputs.budget }}
       MUST: ${{ inputs.must_include }}
       EXCLUDE: ${{ inputs.exclude }}
       AVOID: ${{ inputs.avoid }}
       SEED: ${{ inputs.seed }}
-      BIG: ${{ inputs.big_spell }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -186,11 +190,11 @@ jobs:
       - name: Plan and build the deck
         run: >
           python src/build_deck.py --randomize "$RANDOMIZE" --vibe "$VIBE" --colors "$COLORS" --mech "$MECH"
-          --narr "$NARR" --tribe "$TRIBE" --pick-mode "$PICK_MODE" --commander "$COMMANDER" --budget "$BUDGET"
+          --narr "$NARR" --tribe "$TRIBE" --commander "$COMMANDER" --budget "$BUDGET"
           --must "$MUST" --exclude "$EXCLUDE" --avoid "$AVOID" --seed "$SEED"
       - name: Goldfish simulation
         # Uses the tribe the builder settled on (typed, auto-detected, or none), saved in out/tribe.txt.
-        run: python src/goldfish.py out/deck.txt --tribe "$(cat out/tribe.txt)" --big-spell "$BIG"
+        run: python src/goldfish.py out/deck.txt --tribe "$(cat out/tribe.txt)"
       - name: Bracket report
         run: python src/bracket_report.py out/deck.txt --target "$(cat out/target.txt)"
       - name: Run summary
