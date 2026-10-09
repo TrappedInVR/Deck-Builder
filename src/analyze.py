@@ -1,0 +1,502 @@
+"""Commander analysis: read the commander's rules text, mana cost, power/toughness and keywords, and turn
+them into (1) weighted GAME PLANS the 99 should support, (2) deck-shape adjustments (ramp, draw,
+protection, creature count), and (3) a PERSONALITY profile used to match commanders to deck vibes.
+
+Everything is rule-based (regex over Scryfall text), so it costs $0 and runs in seconds. It reads what the
+card SAYS; it can't discover combos nobody wrote a pattern for, so treat it as a strong, explainable draft."""
+import re
+from functools import lru_cache
+
+# ------------------------------------------------------------------------------------------------
+# Game plans. For each plan:
+#   cmd      = [(regex, weight)] evidence in the COMMANDER's text that it wants this plan
+#   feed     = regexes for cards that FEED the plan (enablers: make tokens, mill, sac outlets...)
+#   pay      = regexes for cards that PAY OFF the plan (they get better when the plan is happening)
+#   types    = regex over a card's type line that counts as feeding it (e.g. instants for spellslinger)
+#   mech     = the mechanical-theme dropdown this plan lines up with (for "better fit" suggestions)
+#   creatures= suggested creature count for decks built around this plan (None = no opinion)
+#   hate     = regexes for cards that actively work AGAINST this plan (penalized)
+# ------------------------------------------------------------------------------------------------
+PLANS = {
+    "Tokens / go wide": dict(
+        cmd=[(r"create[^.]{0,60}tokens?", 2), (r"tokens? you control", 2), (r"whenever (?:a|one or more) (?:creature )?tokens?", 3),
+             (r"\bpopulate\b", 3), (r"for each (?:other )?creature you control", 1.5), (r"creatures you control get \+", 1.5)],
+        feed=[r"create (?:a|an|one|two|three|four|five|x|\d+|that many)[^.]{0,50}creature tokens?", r"\bpopulate\b", r"\bamass\b",
+              r"\bfabricate\b", r"twice that many tokens", r"create[^.]{0,30}tokens? (?:that are|that's) copies"],
+        pay=[r"creatures you control get \+", r"for each creature you control", r"whenever (?:a|one or more) (?:creature )?tokens?",
+             r"tokens? you control", r"\bconvoke\b"],
+        mech="Tokens & Go-Wide", creatures=30,
+        hate=[r"(?:destroy|exile) all (?:non\w+ )?creatures(?! your opponents)", r"all creatures get -\d"]),
+    "+1/+1 counters": dict(
+        cmd=[(r"\+1/\+1 counters?", 2.5), (r"\bproliferate\b", 2.5), (r"counters? on (?:it|them|each)", 1)],
+        feed=[r"put (?:a|an|one|two|three|x|that many|\w+) \+1/\+1 counters?", r"\bproliferate\b", r"\bevolve\b", r"\bbolster\b",
+              r"\badapt \d", r"\bmodular\b", r"\bundying\b", r"\boutlast\b", r"\bsupport \d", r"twice that many (?:\+1/\+1 )?counters"],
+        pay=[r"(?:with|has) (?:a|one or more) \+1/\+1 counters? on (?:it|them)", r"for each \+1/\+1 counter",
+             r"whenever (?:one or more )?\+1/\+1 counters? (?:are|is) put"],
+        mech="+1/+1 Counters", creatures=30),
+    "Sacrifice / aristocrats": dict(
+        cmd=[(r"\bsacrifices? (?:a|another|an|one or more)", 2.5), (r"whenever (?:a|another|one or more)[^.]{0,40}(?:creatures?|permanents?)[^.]{0,30}(?:dies|die|put into a graveyard)", 3),
+             (r"whenever you sacrifice", 3), (r"\bexploit\b", 2)],
+        feed=[r"sacrifice (?:a|another|an)(?: \w+)? (?:creature|artifact|permanent)(?:[^.]{0,20}):", r"\bsacrifice (?:a|another) creature\b",
+              r"create[^.]{0,50}creature tokens?", r"\bexploit\b", r"\bcasualty \d"],
+        pay=[r"whenever (?:a|another|one or more)[^.]{0,40}creatures?[^.]{0,30}(?:dies|die)", r"whenever you sacrifice",
+             r"each opponent loses \w+ life", r"\bblitz\b"],
+        mech="Sacrifice & Aristocrats", creatures=30),
+    "Graveyard / self-mill / reanimation": dict(
+        cmd=[(r"from your graveyard", 2.5), (r"\bmill\b", 2.5), (r"(?:leave|leaves) your graveyard", 3), (r"cards? (?:in|into) your graveyard", 2), (r"put into your graveyard from", 2.5),
+             (r"\bdelirium\b|\bthreshold\b|\bescape\b|\bunearth\b|\bdredge\b|\bflashback\b", 1.5), (r"creature cards? (?:in|from) (?:a|your) graveyard", 2)],
+        feed=[r"\bmills?\b(?! target opponent)", r"put the top \w+ cards? of your library into your graveyard", r"\bdredge\b", r"\bsurveil\b",
+              r"discard (?:a|two|any number of) cards?", r"\bself-mill\b", r"\bentomb\b", r"search your library for a card[^.]{0,30}into your graveyard"],
+        pay=[r"from your graveyard", r"from a graveyard", r"creature cards? in your graveyard", r"\bdelirium\b", r"\bthreshold\b", r"\bescape\b",
+             r"\bflashback\b", r"\bunearth\b", r"\bembalm\b", r"\beternalize\b", r"\bdisturb\b", r"cards? in your graveyard"],
+        mech="Graveyard & Reanimator",
+        hate=[r"exile all (?:cards from all )?graveyards", r"(?:would be put into|would go to) (?:a|any) graveyard[^.]{0,40}exile it instead",
+              r"each player shuffles (?:their|his or her) graveyard"]),
+    "Spellslinger (instants & sorceries)": dict(
+        cmd=[(r"instant (?:or|and) sorcery", 3), (r"noncreature spells?", 2.5), (r"\bmagecraft\b", 3), (r"copy (?:target|that) (?:instant|sorcery|spell)", 2.5),
+             (r"whenever you cast (?:a|an|your|your first) (?:noncreature |instant |sorcery |)spell", 1.5), (r"\bstorm\b", 2),
+             (r"search your library for (?:an? )?(?:instant|sorcery)", 3)],
+        feed=[r"copy (?:target|that) (?:instant|sorcery|spell)", r"instant (?:and|or) sorcery spells you cast cost", r"\bstorm\b"],
+        pay=[r"whenever you cast (?:an|a) (?:instant|sorcery|noncreature)", r"\bmagecraft\b", r"\bprowess\b", r"instant (?:and|or) sorcery cards? (?:in|from) your graveyard"],
+        types=r"\b(?:Instant|Sorcery)\b", mech="Spellslinger", creatures=14),
+    "Artifacts": dict(
+        cmd=[(r"\bartifacts?\b(?! creature you control)", 2), (r"artifacts? you control", 2.5), (r"whenever (?:an?|another|one or more) (?:nontoken )?artifacts?", 3),
+             (r"\bimprovise\b|\bmetalcraft\b|\baffinity for artifacts\b", 2), (r"search your library for (?:an? )?artifact", 3)],
+        feed=[r"create[^.]{0,30}(?:artifact|treasure|clue|food|thopter|servo|construct)[^.]{0,10}tokens?", r"\bfabricate\b"],
+        pay=[r"artifacts? you control", r"whenever (?:an?|another|one or more) artifacts?", r"\bimprovise\b", r"\bmetalcraft\b", r"\baffinity for artifacts\b"],
+        types=r"\bArtifact\b", mech="Artifacts", creatures=24,
+        hate=[r"destroy all artifacts", r"exile all artifacts"]),
+    "Enchantments": dict(
+        cmd=[(r"\benchantments?\b", 2), (r"whenever (?:an?|another) enchantment", 3), (r"\bconstellation\b", 3), (r"\baura\b", 1.5), (r"search your library for (?:an? )?enchantment", 3.5)],
+        feed=[r"create[^.]{0,30}enchantment[^.]{0,10}token"],
+        pay=[r"enchantments? you control", r"whenever (?:an?|another) enchantment", r"\bconstellation\b", r"\bbestow\b"],
+        types=r"\bEnchantment\b", mech="Enchantress", creatures=20,
+        hate=[r"destroy all enchantments", r"exile all enchantments"]),
+    "Lifegain": dict(
+        cmd=[(r"(?:you )?gain(?:s|ed)? (?:\w+ )?life", 2.5), (r"whenever you gain life", 3), (r"\blifelink\b", 1.5), (r"your life total", 1.5)],
+        feed=[r"you gain \w+ life", r"gain \w+ life", r"\blifelink\b", r"\bextort\b"],
+        pay=[r"whenever you gain life", r"if you(?:'ve)? gained life", r"life total(?: is)? (?:greater|higher)", r"for each 1 life you gained"],
+        mech="Lifegain"),
+    "Lands / landfall / ramp": dict(
+        cmd=[(r"\blandfall\b", 3), (r"whenever a land (?:you control )?enters", 3), (r"lands? you control", 2), (r"(?:play|put) (?:an? )?additional lands?", 2.5),
+             (r"land cards? (?:from|in) your graveyard", 2.5), (r"play lands? from", 2)],
+        feed=[r"search your library for (?:up to \w+ )?(?:a |an |two )?(?:basic )?lands?", r"(?:play|put) (?:an? )?additional lands?",
+              r"put (?:a|up to \w+) lands? cards? (?:from|onto)", r"return (?:target|up to \w+) land cards? from your graveyard", r"\bfetch"],
+        pay=[r"\blandfall\b", r"whenever a land (?:you control )?enters", r"for each land you control", r"lands you control"],
+        mech="Landfall & Lands Matter"),
+    "Enter-the-battlefield / blink": dict(
+        cmd=[(r"whenever (?:a|another|one or more)[^.]{0,40}enters(?: the battlefield)? under your control", 2.5),
+             (r"exile (?:another |up to \w+ )?(?:target )?(?:\w+ )?creatures? you control[^.]{0,40}return", 3), (r"\bblink\b|\bflicker\b", 3),
+             (r"enters the battlefield (?:or|and) (?:whenever it )?(?:attacks|dies)", 1)],
+        feed=[r"exile (?:another |up to \w+ )?(?:target )?(?:\w+ )?(?:creature|permanent)s? you (?:control|own)[^.]{0,40}return (?:it|them|that card)",
+              r"\bblink\b|\bflicker\b"],
+        pay=[r"when (?:this creature|\w+(?:, [\w ]+)?) enters(?: the battlefield)?,", r"when [^.]{0,30} enters(?: the battlefield)?, (?:draw|create|destroy|exile|return|search|you gain|deal|target)"],
+        mech="Blink & Value", creatures=30),
+    "Voltron / equipment & auras": dict(
+        cmd=[(r"equipped creature|equipment", 3), (r"enchanted creature|\bauras?\b", 2.5), (r"\battach(?:ed)?\b", 2.5), (r"commander damage", 2),
+             (r"for each (?:aura|equipment)", 3), (r"search your library for (?:an? )?(?:aura|equipment)", 3)],
+        feed=[r"\bequip\b", r"equipped creature (?:gets|has)", r"enchanted creature (?:gets|has)", r"\breconfigure\b", r"\bliving weapon\b"],
+        pay=[r"for each (?:aura|equipment)", r"equipped creatures? you control", r"whenever (?:an? )?(?:aura|equipment) (?:enters|becomes attached)"],
+        types=r"\b(?:Equipment|Aura)\b", mech="Equipment & Auras (Voltron)", creatures=20),
+    "Combat / attack triggers": dict(
+        cmd=[(r"whenever[^.]{0,40}\battacks?\b", 2.5), (r"deals combat damage to (?:a player|an opponent)", 3), (r"additional combat", 3),
+             (r"attacking creatures?", 2), (r"\bmyriad\b|\bbattle cry\b|\bexalted\b|\bmelee\b", 2)],
+        feed=[r"\bhaste\b", r"additional combat phase", r"can't be blocked", r"creatures you control (?:get \+\d+/\+\d+|gain|have)[^.]{0,30}(?:trample|haste|menace|flying|double strike)",
+              r"\bdouble strike\b", r"untap all creatures", r"\bmenace\b"],
+        pay=[r"whenever[^.]{0,40}\battacks?\b", r"deals combat damage to (?:a player|an opponent)", r"\bbattle cry\b", r"\bexalted\b", r"\bmyriad\b"],
+        mech="Combat & Aggro", creatures=32),
+    "Card draw engine / wheels": dict(
+        cmd=[(r"whenever you draw", 3), (r"draws? (?:your )?(?:second|additional) card", 3), (r"each player draws", 2), (r"cards? in (?:your|their|each player's) hand", 1.5)],
+        feed=[r"draws? (?:two|three|four|x|seven|that many) cards", r"each player (?:discards their hand|draws)", r"\bwheel\b"],
+        pay=[r"whenever you draw", r"(?:second|additional) card each turn", r"for each card in your hand", r"no maximum hand size"],
+        mech="Draw, Wheels & Discard"),
+    "Discard / madness": dict(
+        cmd=[(r"whenever you discard", 3), (r"\bdiscards?\b", 1.5), (r"\bmadness\b", 3), (r"\bcycl(?:e|ing)\b", 2)],
+        feed=[r"discard (?:a|two|any number of|your) (?:cards?|hand)", r"\bcycling\b", r"\bconnive\b", r"\brummage\b"],
+        pay=[r"whenever you discard", r"\bmadness\b", r"whenever you cycle", r"from your graveyard"],
+        mech="Draw, Wheels & Discard"),
+    "Treasure / clues / food": dict(
+        cmd=[(r"\btreasures?\b", 3), (r"\bclues?\b", 3), (r"\bfood\b", 3), (r"\bblood tokens?\b", 3), (r"sacrifice (?:an? )?artifact", 2)],
+        feed=[r"create (?:a|an|one|two|three|x|that many) (?:tapped )?(?:treasure|clue|food|blood|gold)", r"\binvestigate\b"],
+        pay=[r"whenever you sacrifice (?:a|an|another) (?:treasure|clue|food|artifact)", r"sacrifice (?:an? )?(?:treasure|artifact|food|clue)[^.]{0,10}:"],
+        mech="Treasure & Clues"),
+    "Burn / drain the table": dict(
+        cmd=[(r"(?:deals?|damage)[^.]{0,30}(?:to )?each opponent", 3), (r"each opponent loses", 3), (r"noncombat damage", 3),
+             (r"whenever an opponent (?:loses life|is dealt damage)", 3), (r"deals? \w+ damage to (?:any target|target (?:player|opponent))", 1.5)],
+        feed=[r"deals? \w+ damage to each opponent", r"each opponent loses \w+ life", r"deals? \w+ damage to (?:any target|target player|each player)",
+              r"if a source you control would deal (?:noncombat )?damage[^.]{0,40}(?:double|plus)"],
+        pay=[r"whenever an opponent (?:loses life|is dealt damage)", r"whenever a source you control deals noncombat damage"],
+        mech="Group Slug & Burn"),
+    "Big creatures / power matters": dict(
+        cmd=[(r"power (?:\d+|x) or greater", 3), (r"greatest power", 3), (r"\bferocious\b", 3), (r"(?:total )?power[^.]{0,20}(?:among|of creatures)", 2),
+             (r"creature spells? (?:you cast )?with (?:mana value|power) \d+ or greater", 3)],
+        feed=[r"\btrample\b", r"\bfights?\b", r"\bmonstrosity\b", r"creature spells you cast cost \{\d\} less"],
+        pay=[r"power (?:\d+|x) or greater", r"greatest power", r"\bferocious\b"],
+        mech="Big Creatures & Stompy", creatures=34),
+    "Cast from exile / impulse draw": dict(
+        cmd=[(r"exile the top[^.]{0,60}(?:you may (?:play|cast)|until)", 3), (r"cast[^.]{0,30}from exile", 3), (r"cards? (?:you own )?in exile", 2.5),
+             (r"\bforetell\b|\bplot\b|\bcascade\b|\bdiscover\b", 2.5)],
+        feed=[r"exile the top[^.]{0,60}you may (?:play|cast)", r"\bcascade\b", r"\bdiscover \d", r"\bforetell\b", r"\bplot\b"],
+        pay=[r"(?:play|cast)[^.]{0,30}from exile", r"whenever you cast a spell from exile"],
+        mech="Draw, Wheels & Discard"),
+    "Legends / historic": dict(
+        cmd=[(r"\blegendary\b(?! creature you control gets)", 2), (r"\bhistoric\b", 3)],
+        feed=[], pay=[r"\bhistoric\b", r"legendary (?:creatures?|spells?|permanents?) you control"],
+        types=r"\bLegendary\b"),
+    "Tap & untap abilities": dict(
+        cmd=[(r"\buntap (?:target|another|each|all|up to)", 3), (r"becomes? tapped", 2), (r"tap an untapped", 2), (r"\binspired\b", 2)],
+        feed=[r"\buntap (?:target|another|all|each|up to)", r"\bseedborn\b", r"(?:has|have|gains?) haste", r"as though (?:it|they) had haste"],
+        pay=[r"\{t\}:[^.]{0,40}(?:draw|deal|create|add|destroy|exile|put)", r"whenever[^.]{0,30}becomes tapped"]),
+    "Politics / goad / monarch": dict(
+        cmd=[(r"\bgoad", 3), (r"\bmonarch\b", 3), (r"\bvote\b|will of the council|council's dilemma", 3), (r"target opponent (?:chooses|gains control|may)", 2)],
+        feed=[r"\bgoad", r"\bmonarch\b", r"\bvote\b", r"will of the council", r"council's dilemma"],
+        pay=[r"attacked this turn", r"attacking (?:one of )?your opponents", r"whenever a creature attacks one of your opponents"],
+        mech="Group Hug & Politics"),
+    "Steal & copy opponents' stuff": dict(
+        cmd=[(r"gain control of", 3), (r"spells? (?:your opponents|an opponent) (?:own|control)", 3), (r"cards? (?:your opponents|an opponent) owns?", 3),
+             (r"(?:from|of) (?:an opponent's|each opponent's|target opponent's) library", 2)],
+        feed=[r"gain control of (?:target|that|each|all)", r"exile the top[^.]{0,30}(?:each|target) opponent's library[^.]{0,60}(?:cast|play)",
+              r"cast (?:it|that card|them) without paying"],
+        pay=[r"you don't own", r"(?:spells|cards) you don't own"]),
+    "Mill your opponents": dict(
+        cmd=[(r"(?:target|each) (?:player|opponent) mills", 3), (r"cards? in (?:an opponent's|each opponent's|their) graveyards?", 2), (r"opponent's library", 1.5)],
+        feed=[r"(?:target|each) (?:player|opponent) mills", r"target player puts the top \w+ cards", r"each opponent mills"],
+        pay=[r"cards? in (?:each opponent's|an opponent's|target opponent's) graveyard", r"no cards in (?:their|his or her) library"]),
+    "Dice & coin flips": dict(
+        cmd=[(r"roll (?:a|one or more|\w+) d\d+|\broll\b", 3), (r"flip (?:a|\w+) coins?", 3)],
+        feed=[r"roll (?:a|two|one or more|\w+) d\d+", r"flip (?:a|\w+) coins?"],
+        pay=[r"whenever you roll", r"whenever you (?:win|lose) a (?:coin )?flip", r"roll (?:an )?additional", r"reroll"]),
+    "Vehicles": dict(
+        cmd=[(r"\bvehicles?\b", 3), (r"\bcrew(?:s|ed)?\b", 3)],
+        feed=[r"\bcrew \d"], pay=[r"vehicles? you control", r"whenever (?:a|another) vehicle", r"becomes crewed"], types=r"\bVehicle\b"),
+    "Poison / proliferate": dict(
+        cmd=[(r"\binfect\b|\btoxic\b|poison counters?", 3), (r"\bproliferate\b", 1.5)],
+        feed=[r"\binfect\b", r"\btoxic \d", r"\bpoisonous\b", r"\bproliferate\b"], pay=[r"poison counters?"]),
+    "Superfriends (planeswalkers)": dict(
+        cmd=[(r"\bplaneswalkers?\b", 2.5), (r"loyalty (?:abilities|counters?)", 3)],
+        feed=[r"\bproliferate\b", r"loyalty abilities[^.]{0,30}additional"], pay=[r"planeswalkers? you control"], types=r"\bPlaneswalker\b", creatures=22),
+    "Clones & copies": dict(
+        cmd=[(r"(?:token that's a |becomes a )?copy of (?:target|another|a|that)", 2.5), (r"\bpopulate\b", 1.5)],
+        feed=[r"(?:enter|enters)(?: the battlefield)? as a copy of", r"create a token that's a copy of", r"becomes a copy of", r"\bmyriad\b"], pay=[]),
+    "Big spells / X costs": dict(
+        cmd=[(r"mana value (?:5|6|7|8) or greater", 3), (r"greatest mana value", 2), (r"spells? with mana value \d+ or greater", 2.5), (r"\{x\}", 1)],
+        feed=[r"add (?:\{c\}\{c\}|\{c\}\{c\}\{c\}|x mana|that much mana|an amount of)", r"costs? \{\d\} less to cast"],
+        pay=[r"\{x\}"]),
+    "Flash / opponents' turns": dict(
+        cmd=[(r"\bflash\b", 1.5), (r"during (?:each|an) opponent's turn", 3), (r"whenever you cast a spell during an opponent's turn", 3)],
+        feed=[r"\bflash\b", r"as though (?:it|they) had flash"], pay=[r"during (?:each|an) opponent's turn"], types=r"\bInstant\b"),
+    "Creature spells matter": dict(
+        cmd=[(r"whenever you cast a creature spell", 3), (r"creature spells you cast", 2.5)],
+        feed=[r"creature spells you cast cost", r"you may cast creature spells as though"],
+        pay=[r"whenever you cast a creature spell"], types=r"\bCreature\b", creatures=36),
+}
+
+_RX = {}
+for _name, _p in PLANS.items():
+    _RX[_name] = dict(
+        cmd=[(re.compile(r, re.I), w) for r, w in _p["cmd"]],
+        feed=re.compile("|".join(_p["feed"]), re.I) if _p.get("feed") else None,
+        pay=re.compile("|".join(_p["pay"]), re.I) if _p.get("pay") else None,
+        types=re.compile(_p["types"]) if _p.get("types") else None,
+        hate=re.compile("|".join(_p["hate"]), re.I) if _p.get("hate") else None)
+
+EVASION = {"Flying", "Trample", "Menace", "Shadow", "Fear", "Intimidate", "Skulk", "Horsemanship"}
+_UNBLOCKABLE = re.compile(r"can't be blocked", re.I)
+_PROTECT_KW = re.compile(r"\b(?:hexproof|indestructible|shroud|ward)\b", re.I)
+_ACT_COST = re.compile(r"^(?:\{[^}]+\})+[^:\n]{0,40}:", re.M)
+_REPEAT_DRAW = re.compile(r"(?:whenever|at the beginning of)[^.]{0,80}draw (?:a|one|two|that many|cards?)|\{t\}[^:]{0,20}:[^.]{0,30}draw", re.I)
+_REPEAT_RAMP = re.compile(r"\badd \{|(?:whenever|at the beginning of)[^.]{0,60}(?:treasure|search your library for (?:a|up to \w+) (?:basic )?land)|"
+                          r"(?:play|put) (?:an? )?additional land", re.I)
+_REPEAT_REMOVAL = re.compile(r"(?:whenever|at the beginning of|\{t\}[^:]{0,20}:)[^.]{0,80}(?:destroy|exile) target|"
+                             r"(?:whenever|\{t\}[^:]{0,20}:)[^.]{0,60}deals? \w+ damage to (?:any target|target creature)", re.I)
+_SELF_ANCHORED = re.compile(r"whenever (?:~|this creature|it|\w+(?:, [\w' -]+)?) (?:attacks|deals combat damage|becomes tapped)|"
+                            r"\{t\}[^:]{0,15}:|equipped|enchanted creature|commander damage", re.I)
+
+
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+NOT_CREATURE_TYPES = {"Equipment", "Vehicle", "Aura", "Food", "Treasure", "Clue", "Forest", "Island", "Plains", "Swamp", "Mountain",
+                      "Saga", "Shrine", "Gate", "Cave", "Desert", "Lair", "Locus", "Urza's", "Power-Plant", "Tower", "Mine",
+                      "Sphere", "Fortification", "Contraption", "Attraction", "Blood", "Gold", "Powerstone", "Incubator", "Map",
+                      "Junk", "Class", "Case", "Room", "Role", "Rune", "Background", "Cartouche", "Curse", "Shard", "Town", "Omen"}
+
+
+def creature_types(idx_cards):
+    """All creature subtypes that appear in the card pool (used to spot 'Dragons you control' etc.)."""
+    out = set()
+    for c in idx_cards:
+        tl = c.get("type_line") or ""
+        if "Creature" in tl and "—" in tl:
+            for half in tl.split("//"):
+                if "—" in half and "Creature" in half:
+                    out.update(w for w in half.split("—", 1)[1].split() if w[:1].isupper())
+    return out - NOT_CREATURE_TYPES
+
+
+def _self_name_free(cmd):
+    """Rules text with the card's own name replaced by '~' so 'Whenever Gorm attacks' reads as a self-trigger."""
+    x = cmd.get("text") or ""
+    for n in {cmd["name"], cmd["name"].split(",")[0], cmd["name"].split(" // ")[0]}:
+        if n:
+            x = x.replace(n, "~")
+    return x
+
+
+_TYPE_RX = {}
+
+
+def _type_rx(all_types):
+    key = len(all_types)
+    if key not in _TYPE_RX:
+        forms = {}
+        for t in all_types:
+            fs = [t, t + "s", t + "es"]
+            if t.endswith("f"):
+                fs.append(t[:-1] + "ves")
+            if t.endswith("y"):
+                fs.append(t[:-1] + "ies")
+            for f in fs:
+                forms[f] = t
+        rx = re.compile(r"\b(%s)\b" % "|".join(sorted(map(re.escape, forms), key=len, reverse=True)))
+        _TYPE_RX[key] = (rx, forms)
+    return _TYPE_RX[key]
+
+
+def typal_refs(cmd, all_types):
+    """Creature types the commander's text talks about (its own types included), e.g. 'other Dragons you control'.
+    Types that only appear in tokens it CREATES don't count (Talrand makes Drakes; it doesn't care about Drakes)."""
+    x = re.sub(r"create[^.]*?tokens?", " ", _self_name_free(cmd), flags=re.I)
+    rx, forms = _type_rx(all_types)
+    return sorted({forms[m] for m in rx.findall(x)})
+
+
+def analyze(cmd, all_types=frozenset()):
+    """Return the commander's game plan profile.
+
+    plans:    [{name, weight, why}] strongest first (weight ~1..10)
+    adjust:   role quota changes, e.g. {'ramp': +2, 'draw': -2, 'protection': 3}
+    creatures: suggested creature count (None = let the theme/vibe decide)
+    notes:    plain-English observations (stats, mana, keywords)"""
+    x = _self_name_free(cmd)
+    xl = x.lower()
+    plans = {}
+    for name, rx in _RX.items():
+        w, why = 0.0, []
+        for r, wt in rx["cmd"]:
+            m = r.search(x)
+            if m:
+                w += wt
+                why.append(m.group(0).strip())
+        if w:
+            plans[name] = [w, why]
+
+    notes, adjust = [], {}
+    cmc = cmd.get("cmc") or 0
+    pw, tg = num(cmd.get("power")), num(cmd.get("toughness"))
+    kws = set(cmd.get("keywords") or [])
+    kws |= {k.title() for k in ("flying", "trample", "menace", "lifelink", "deathtouch", "haste", "vigilance", "double strike",
+                                "first strike", "hexproof", "indestructible", "ward") if re.search(r"(?:^|\n|, )%s\b" % k, xl)}
+    evasive = bool(kws & EVASION) or bool(_UNBLOCKABLE.search(x))
+
+    # --- stats-driven plans
+    is_creature = "Creature" in (cmd.get("type_line") or "")
+    if is_creature and cmc <= 6 and ((pw >= 5 and evasive) or (pw >= 3 and "Double Strike" in kws)
+                                      or (pw >= 4 and _UNBLOCKABLE.search(x))):
+        plans.setdefault("Voltron / equipment & auras", [0, []])
+        plans["Voltron / equipment & auras"][0] += 2 + (1 if pw >= 6 else 0)
+        plans["Voltron / equipment & auras"][1].append(f"{int(pw)}/{int(tg)} with {', '.join(sorted(kws & (EVASION | {'Double Strike'})) or ['evasion'])}")
+        notes.append(f"Hits hard on its own ({int(pw)} power, evasive): commander damage is a real win route.")
+    if "Lifelink" in kws and "Lifegain" not in plans:
+        plans.setdefault("Lifegain", [0, []])
+        plans["Lifegain"][0] += 1.5
+        plans["Lifegain"][1].append("lifelink")
+    if "Deathtouch" in kws and re.search(r"deals? \w+ damage|fights?", xl):
+        notes.append("Deathtouch plus damage/fight text: every point of damage it deals is removal.")
+
+    # --- what the commander already does for you (so the 99 needs less of it)
+    if _REPEAT_DRAW.search(x):
+        adjust["draw"] = adjust.get("draw", 0) - 2
+        notes.append("Draws cards by itself, so the deck runs a little less card draw.")
+    if _REPEAT_RAMP.search(x):
+        adjust["ramp"] = adjust.get("ramp", 0) - 2
+        notes.append("Makes mana or lands by itself, so the deck runs a little less ramp.")
+    if _REPEAT_REMOVAL.search(x):
+        adjust["removal"] = adjust.get("removal", 0) - 1
+        notes.append("Is repeatable removal on its own.")
+
+    # --- mana
+    if cmc >= 6:
+        adjust["ramp"] = adjust.get("ramp", 0) + 2
+        notes.append(f"Costs {int(cmc)} mana: extra ramp so it lands on time.")
+    elif cmc >= 5:
+        adjust["ramp"] = adjust.get("ramp", 0) + 1
+    elif cmc <= 2 and is_creature:
+        notes.append(f"Only {int(cmc)} mana: comes down early, so cheap support cards matter more than big ramp.")
+        adjust["ramp"] = adjust.get("ramp", 0) - 1
+    if is_creature and re.search(r"^[^:\n]{0,30}\{T\}[^:\n]{0,30}:", x, re.M):
+        plans.setdefault("Tap & untap abilities", [0, []])
+        plans["Tap & untap abilities"][0] += 2.5
+        plans["Tap & untap abilities"][1].append("has a {T} ability (untap effects double it)")
+    acts = _ACT_COST.findall(x)
+    if acts:
+        notes.append("Has a mana-hungry activated ability: extra mana turns into extra value.")
+        adjust["ramp"] = adjust.get("ramp", 0) + 1
+
+    # --- does the plan run THROUGH the commander? then protect it
+    anchored = bool(_SELF_ANCHORED.search(x)) or "Voltron / equipment & auras" in plans
+    if anchored and is_creature:
+        prot = 4 if "Voltron / equipment & auras" in plans else 3
+        if _PROTECT_KW.search(xl) or kws & {"Hexproof", "Indestructible", "Ward"}:
+            prot -= 1
+            notes.append("Has built-in protection, so it needs fewer protection spells.")
+        elif tg <= 2:
+            prot += 1
+            notes.append(f"Fragile ({int(tg)} toughness) and the deck runs through it: extra protection.")
+        adjust["protection"] = prot
+
+    # --- creature count suggestion: average of what the top plans want, weighted
+    ordered = sorted(([n, w, why] for n, (w, why) in plans.items()), key=lambda r: -r[1])
+    if ordered:
+        top_w = ordered[0][1]
+        ordered = [r for r in ordered if r[1] >= max(1.5, top_w * 0.25)]   # drop faint, incidental matches
+    wants = [(PLANS[n].get("creatures"), w) for n, w, _ in ordered[:3] if PLANS[n].get("creatures")]
+    creatures = round(sum(c * w for c, w in wants) / sum(w for _, w in wants)) if wants else None
+    if any(n.startswith("Spellslinger") for n, _, _ in ordered[:1]):
+        adjust["counter"] = adjust.get("counter", 0) + 1
+
+    if not ordered and is_creature and evasive and pw >= 3:
+        ordered = [["Combat / attack triggers", 2.0, [f"{int(pw)}-power evasive body"]]]
+    out = [dict(name=n, weight=round(min(w, 10), 1), why=sorted(set(why), key=len)[:3]) for n, w, why in ordered[:6]]
+    return dict(plans=out, adjust=adjust, creatures=creatures, notes=notes,
+                typal=typal_refs(cmd, all_types) if all_types else [], evasive=evasive, power=pw, toughness=tg, cmc=cmc)
+
+
+# ------------------------------------------------------------------------------------------------
+# Per-card plan matching (cached once per card; the commander only changes the weights)
+# ------------------------------------------------------------------------------------------------
+_card_cache = {}
+
+
+def card_hits(card):
+    """{plan: strength 0..3} for every plan this card feeds or pays off, plus {plan: True} hate flags."""
+    key = card["name"]
+    if key in _card_cache:
+        return _card_cache[key]
+    x = card.get("text") or ""
+    tl = card.get("type_line") or ""
+    hits, hate = {}, set()
+    for name, rx in _RX.items():
+        s = 0
+        if rx["feed"]:
+            s += min(len({m.group(0).lower() for m in rx["feed"].finditer(x)}), 2)
+        if rx["pay"]:
+            s += min(len({m.group(0).lower() for m in rx["pay"].finditer(x)}), 2) * 1.2
+        if rx["types"] and rx["types"].search(tl):
+            s += 1
+        if s:
+            hits[name] = min(s, 3)
+        if rx["hate"] and rx["hate"].search(x):
+            hate.add(name)
+    _card_cache[key] = (hits, hate)
+    return hits, hate
+
+
+def synergy(card, profile, tribe_words=()):
+    """How much this card helps THIS commander's plans. Returns (score 0..~60, reason or '')."""
+    hits, hate = card_hits(card)
+    s, best, best_v = 0.0, "", 0.0
+    for p in profile["plans"]:
+        h = hits.get(p["name"])
+        if h:
+            v = h * p["weight"] * 2.0
+            s += v
+            if v > best_v:
+                best, best_v = p["name"], v
+        if p["name"] in hate:
+            s -= 6 * p["weight"]
+    # creature types the commander cares about (beyond the main tribe system)
+    tl = card.get("type_line") or ""
+    sub = tl.split("—", 1)[1] if "—" in tl else ""
+    for t in tribe_words:
+        if re.search(r"\b%s\b" % re.escape(t), sub) or ("Creature" in tl and "changeling" in (card.get("text") or "").lower()):
+            s += 12
+            if best_v < 12:
+                best, best_v = f"{t} (named by your commander)", 12
+            break
+    return min(s, 60.0), best
+
+
+# ------------------------------------------------------------------------------------------------
+# Commander personality -> which vibe it naturally is
+# ------------------------------------------------------------------------------------------------
+TRAITS = {
+    "mean": [r"each opponent (?:loses|sacrifices|discards|mills|exiles)", r"(?:an|each|target) opponent (?:sacrifices|discards)", r"(?:opponents|players) can't",
+             r"\bgain control of\b", r"under your control[^.]{0,40}(?:opponent|you don't own)|(?:opponent|you don't own)[^.]{0,60}under your control",
+             r"(?:destroy|exile) (?:target|each|all) (?:\w+ )?(?:creatures?|permanents?|artifacts?|enchantments?)(?: (?:an opponent|your opponents) controls?)?",
+             r"counter target", r"deals? \w+ damage to (?:each opponent|each player|target player|target opponent|any target)",
+             r"(?:target|each) (?:player|opponent) (?:discards|sacrifices|loses)", r"opponents? (?:each )?lose(?:s)? \w+ life",
+             r"whenever an opponent (?:casts|draws|activates|searches|sacrifices|discards|loses)", r"spells (?:your )?opponents cast cost",
+             r"\btap target\b", r"(?:creatures|permanents) (?:your opponents control|an opponent controls)", r"-\d/-\d|-1/-1 counter",
+             r"can't (?:attack|block|untap|gain life)", r"\bskips?\b", r"cards? (?:your opponents|an opponent) owns?"],
+    "stax": [r"cost[s]? \{\d+\} more", r"(?:players?|opponents?|each opponent)[^.]{0,30}can't (?:cast|search|activate|draw|gain)",
+             r"can't cast (?:more than|spells)", r"(?:don't|doesn't) untap", r"(?:opponents?|your opponents)[^.]{0,30}enter(?:s)?(?: the battlefield)? tapped",
+             r"each player can't", r"\bskip", r"nonbasic lands", r"can't (?:attack you|be cast)", r"(?:only|no more than) one"],
+    "chaos": [r"flip a coin", r"\broll\b", r"\brandom", r"exchange", r"\bcascade\b", r"\bgoad", r"gain control", r"each player shuffles",
+              r"discards? (?:their|that) hand", r"\bswap\b", r"chaos", r"cast (?:it|that card|them) without paying", r"you don't own",
+              r"top card of (?:each|target) (?:player's|opponent's) library"],
+    "hug": [r"each player (?:may )?(?:draws?|gains?|puts?|creates?|searches|untaps)", r"each opponent (?:may )?(?:draws?|gains?|creates?)",
+            r"\bmonarch\b", r"\bvote\b|will of the council|council's dilemma", r"target (?:opponent|player) (?:draws|gains|creates|may)", r"\bdonate\b",
+            r"gains? control of (?:target|that) (?:\w+ )?(?:you control|permanent you own)"],
+    "gentle": [r"gain \w+ life", r"create[^.]{0,40}token", r"\+1/\+1 counter", r"\blandfall\b", r"whenever a land", r"enchantments? you control",
+               r"search your library for a basic land", r"you control get \+"],
+    "pressure": [r"whenever[^.]{0,40}\battacks?\b", r"combat damage to (?:a player|an opponent|one or more players)", r"additional combat",
+                 r"\bdouble strike\b", r"\bhaste\b", r"onto the battlefield (?:tapped and )?attacking", r"\bmenace\b|can't be blocked",
+                 r"creatures you control get \+\d"],
+    "engine": [r"draw (?:a|two|that many) cards?", r"\buntap\b", r"copy", r"additional combat", r"costs? \{\d\} less", r"extra turn",
+               r"without paying its mana cost", r"\badd \{", r"double"],
+}
+_TRX = {k: [re.compile(r, re.I) for r in v] for k, v in TRAITS.items()}
+
+
+@lru_cache(maxsize=None)
+def _traits_for(name, text, rank):
+    t = {k: min(sum(1 for r in rx if r.search(text)) / 1.5, 1.0) for k, rx in _TRX.items()}
+    # popularity = proven power. EDHREC rank 1-300 -> ~1.0, 3000+ -> ~0.
+    t["power"] = 0.0 if not rank else max(0.0, min(1.0, 1.15 - 0.35 * __import__("math").log10(rank + 1)))
+    return t
+
+
+def traits(cmd):
+    return _traits_for(cmd["name"], _self_name_free(cmd), cmd.get("rank") or 0)
+
+
+def vibe_fit(cmd, vibes):
+    """{vibe_label: 0..1} how naturally this commander plays each vibe, plus the best one."""
+    t = traits(cmd)
+    raw = {label: sum(w * t.get(k, 0) for k, w in v["personality"].items()) + v.get("bias", 0) for label, v in vibes.items()}
+    lo, hi = min(raw.values()), max(raw.values())
+    span = (hi - lo) or 1.0
+    fit = {k: round((r - lo) / span, 3) for k, r in raw.items()}
+    best = max(raw, key=raw.get)
+    return fit, best, raw
+
+
+def fit_label(fit_value, is_best):
+    if is_best or fit_value >= 0.8:
+        return "natural fit"
+    if fit_value >= 0.45:
+        return "workable"
+    return "stretch"
+
+
+def plan_for_theme(mech):
+    """The game plan that matches a mechanical-theme dropdown (used when the commander has no engine of its own)."""
+    for name, p in PLANS.items():
+        if p.get("mech") == mech:
+            return name
+    return None

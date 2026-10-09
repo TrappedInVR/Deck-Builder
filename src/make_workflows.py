@@ -21,7 +21,7 @@ VIBE_HELP = " | ".join(f"{k.split(' (')[0]}: {v['blurb']}" for k, v in O.VIBES.i
 AVOID_HELP = ", ".join(sorted(O.AVOID_WORDS))
 
 COMMON = [
-    inp("vibe", "Deck vibe: sets the bracket, power, and how mean or chaotic the deck is. Applies even if you type a commander.",
+    inp("vibe", "Deck vibe: the deck's personality (every vibe is Bracket 3). Mean vibes pick mean commanders. Applies even if you type a commander.",
         "choice", O.DEFAULT_VIBE, O.VIBE_LABELS),
     inp("colors", "Colors (exact color identity). Ignored if you type a commander.", "choice", O.ANY, O.COLOR_LABELS),
     inp("mechanical_theme", "Mechanical theme: how the deck plays.", "choice", O.ANY, O.MECH_LABELS),
@@ -37,7 +37,7 @@ BUILD_ONLY_TOP = [
 BUILD_ONLY_AFTER = [
     inp("pick_mode", "When Commander is blank: take the best match, or a random one from the top 10.", "choice", O.PICK_MODES[0], O.PICK_MODES),
     inp("commander", "Commander (optional, exact card name). Overrides the commander and colors dropdowns. Blank = pick one that fits.", "string", ""),
-    inp("budget", "Approx USD budget for the deck (blank = the vibe's default). Prices are rough.", "string", ""),
+    inp("budget", "Approx USD budget for the nonland cards, max 500 (blank = 500). Lands never count: dual/shock/fetch lands are always included.", "string", ""),
     inp("must_include", "Cards to force in, separated by semicolons. Example: Sol Ring; Rhystic Study", "string", ""),
     inp("exclude", "Cards to leave out, separated by semicolons.", "string", ""),
     inp("avoid", "Things this deck must never include, comma separated. Options: " + AVOID_HELP, "string", ""),
@@ -58,9 +58,15 @@ CACHE_AND_FETCH = """      - uses: actions/checkout@v4
       - uses: actions/cache@v4            # one Scryfall download per day, reused across runs
         with:
           path: data/cards.json
-          key: cards-v2-${{ steps.day.outputs.d }}
+          key: cards-v3-${{ steps.day.outputs.d }}
       - name: Fetch Scryfall data (skipped if cached today)
         run: test -s data/cards.json || python src/fetch_cards.py
+      - uses: actions/cache@v4            # Commander Spellbook combo database, once per day
+        with:
+          path: data/combos.json
+          key: combos-v1-${{ steps.day.outputs.d }}
+      - name: Fetch combo data from Commander Spellbook (skipped if cached today; never fails the run)
+        run: test -s data/combos.json || python src/fetch_combos.py
 """
 
 build = "\n".join([

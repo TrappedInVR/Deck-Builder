@@ -11,54 +11,90 @@ import re
 ANY = "Any (no preference)"
 
 # ----------------------------------------------------------------------------------------------
-# 1. Deck vibe: the master dial. Sets bracket, Game Changer budget, tutors/extra turns, interaction
-#    levels, what the table feels like, and which cards are off limits.
+# 1. Deck vibe: personality, NOT power level. Every vibe builds a legal Bracket 3 deck:
+#    at most 3 Game Changers, no mass land denial, no chained extra turns.
+#    The vibe decides how the deck treats the table (generous, chaotic, mean...) and which commanders
+#    fit it naturally. Mean vibes pick commanders that are mean by nature.
 # ----------------------------------------------------------------------------------------------
-# quotas  = minimum counts of each role the builder tries to include
-# slots   = how many cards of a "feel" (grouphug, chaos, stax, ...) to reserve
-# pop     = weight on EDHREC popularity (higher = more proven staples, less personality)
-# avoid   = things this vibe never includes (same words you can type in the Avoid box)
+# quotas      = minimum counts of each role the builder tries to include
+# slots       = how many cards of a "feel" (grouphug, chaos, stax, punish...) to reserve
+# pop         = weight on EDHREC popularity (higher = more proven staples, less personality)
+# budget      = USD for the 99's nonland cards (lands never count; see lands.py)
+# avoid       = things this vibe never includes (same words you can type in the Avoid box)
+# combo_max   = highest Commander Spellbook combo tag allowed (E/C/O = casual, P/S = Bracket 3). R is never allowed.
+# combo_slots = how many complete combos the builder actively adds (0 = only keep ones that happen naturally)
+# personality = which commander traits fit this vibe (see analyze.TRAITS): mean, stax, chaos, hug,
+#               gentle, engine, power. Negative = commanders like that are a poor match.
+BRACKET = 3
+_B3 = dict(bracket=BRACKET, max_gc=3)
 VIBES = {
-    "Relaxed Casual (Bracket 2)": dict(
-        bracket=2, max_gc=0, gc_target=0, max_extra_turns=0, max_tutors=0, budget=100, lands=38,
-        quotas=dict(ramp=10, draw=7, removal=4, counter=0, sweeper=1, recursion=2), slots={}, pop=0.6,
-        avoid={"stax", "extra turns", "tutors", "counterspells", "infect", "land destruction", "theft", "discard"},
-        blurb="Low pressure: lots of mana and cards, little interaction. Games run long and everyone gets to do things."),
-    "Social Table: Fun for Everyone (Bracket 2)": dict(
-        bracket=2, max_gc=0, gc_target=0, max_extra_turns=0, max_tutors=0, budget=100, lands=37,
-        quotas=dict(ramp=9, draw=8, removal=3, counter=0, sweeper=0, recursion=2),
+    "Relaxed Casual": dict(_B3,
+        combo_max="O", combo_slots=0,
+        gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, lands=38,
+        quotas=dict(ramp=10, draw=8, removal=5, counter=1, sweeper=1, recursion=2), slots={}, pop=0.7,
+        avoid={"stax", "extra turns", "tutors", "infect", "land destruction", "theft", "discard"},
+        personality=dict(gentle=1.4, hug=0.4, engine=0.2, mean=-1.5, pressure=-0.4, stax=-2.0, chaos=-0.3),
+        blurb="Build your board and enjoy it. Light interaction, no lockouts, games go long and everyone gets to play."),
+    "Social Table: Fun for Everyone": dict(_B3,
+        combo_max="O", combo_slots=0,
+        gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, lands=37,
+        quotas=dict(ramp=9, draw=8, removal=4, counter=0, sweeper=1, recursion=2),
         slots=dict(grouphug=8, politics=4), pop=0.5,
-        avoid={"stax", "extra turns", "tutors", "counterspells", "wipes", "infect", "land destruction", "theft", "discard"},
+        avoid={"stax", "extra turns", "tutors", "infect", "land destruction", "discard"},
+        personality=dict(hug=2.2, gentle=0.6, chaos=0.4, mean=-1.2, stax=-2.0),
         blurb="Generous, symmetrical and political cards that give the whole table something to do."),
-    "Competitive-Casual: Win and Have a Good Time (Bracket 3)": dict(
-        bracket=3, max_gc=2, gc_target=2, max_extra_turns=1, max_tutors=2, budget=300, lands=37,
-        quotas=dict(ramp=10, draw=9, removal=6, counter=3, sweeper=2, recursion=2), slots={}, pop=1.0,
+    "Competitive-Casual: Win and Have a Good Time": dict(_B3,
+        combo_max="P", combo_slots=1,
+        gc_target=2, max_extra_turns=1, max_tutors=2, budget=500, lands=37,
+        quotas=dict(ramp=10, draw=9, removal=7, counter=3, sweeper=2, recursion=2), slots={}, pop=1.0,
         avoid={"stax", "infect", "land destruction"},
-        blurb="A real plan to win, with interaction, but nothing that locks players out of the game."),
-    "Chaos & Memes: Chaotic Fun (Bracket 3)": dict(
-        bracket=3, max_gc=1, gc_target=1, max_extra_turns=1, max_tutors=0, budget=150, lands=37,
-        quotas=dict(ramp=9, draw=6, removal=4, counter=0, sweeper=1, recursion=2), slots=dict(chaos=14), pop=0.5,
+        personality=dict(power=0.9, engine=0.6, gentle=0.3, pressure=0.3, mean=0.2, stax=-0.8, chaos=-0.2), bias=0.3,
+        blurb="A real plan to win with real interaction, but nothing that locks players out of the game."),
+    "Chaos & Memes: Chaotic Fun": dict(_B3,
+        combo_max="O", combo_slots=1,
+        gc_target=1, max_extra_turns=1, max_tutors=0, budget=500, lands=37,
+        quotas=dict(ramp=9, draw=7, removal=5, counter=1, sweeper=1, recursion=2), slots=dict(chaos=14), pop=0.5,
         avoid={"stax", "infect", "land destruction", "tutors"},
-        blurb="Coin flips, swaps, wheels and wild effects. Unpredictable, but still functional."),
-    "Table Threat: Scary to Play Against (Bracket 3)": dict(
-        bracket=3, max_gc=3, gc_target=3, max_extra_turns=1, max_tutors=3, budget=500, lands=36,
-        quotas=dict(ramp=11, draw=9, removal=7, counter=4, sweeper=2, recursion=3), slots={}, pop=1.3,
+        personality=dict(chaos=2.6, hug=0.5, gentle=0.1, power=-0.3, stax=-1.0),
+        blurb="Coin flips, swaps, wheels and wild effects. Unpredictable, but still a working deck."),
+    "Table Threat: Scary to Play Against": dict(_B3,
+        combo_max="S", combo_slots=1,
+        gc_target=3, max_extra_turns=1, max_tutors=3, budget=500, lands=36,
+        quotas=dict(ramp=11, draw=9, removal=8, counter=3, sweeper=2, recursion=2), slots=dict(punish=6), pop=1.2,
         avoid={"infect", "land destruction"},
-        blurb="The strongest a Bracket 3 deck can be: full Game Changer allowance, real interaction, fast pressure."),
-    "Hostile Control: Stax & Hate (Bracket 4)": dict(
-        bracket=4, max_gc=99, gc_target=5, max_extra_turns=2, max_tutors=3, budget=600, lands=36,
-        quotas=dict(ramp=10, draw=8, removal=8, counter=6, sweeper=4, recursion=1), slots=dict(stax=8), pop=1.0,
-        avoid={"infect"},
-        blurb="Taxes, restrictions, counterspells and sweepers. Built to make everyone else's turn miserable. "
-              "(No mass land denial: the builder never includes it.)"),
-    "Optimized Menace: High Power (Bracket 4)": dict(
-        bracket=4, max_gc=99, gc_target=8, max_extra_turns=2, max_tutors=5, budget=1500, lands=35,
-        quotas=dict(ramp=13, draw=10, removal=7, counter=5, sweeper=2, recursion=2), slots=dict(fastmana=4), pop=1.6,
+        personality=dict(mean=1.6, pressure=0.7, power=1.0, engine=0.4, hug=-0.8, gentle=-0.3),
+        blurb="Punishing and relentless: the commander makes opponents pay every turn, backed by heavy interaction."),
+    "Hostile Control: Stax & Hate": dict(_B3,
+        combo_max="S", combo_slots=1,
+        gc_target=3, max_extra_turns=0, max_tutors=2, budget=500, lands=36,
+        quotas=dict(ramp=10, draw=9, removal=8, counter=5, sweeper=3, recursion=1), slots=dict(stax=7, punish=4), pop=1.0,
+        avoid={"infect", "land destruction"},
+        personality=dict(stax=2.4, mean=1.5, power=0.3, hug=-1.2, gentle=-0.8),
+        blurb="Taxes, restrictions, counterspells and sweepers that make everyone else's turn miserable. "
+              "Still Bracket 3: no mass land denial, ever."),
+    "Optimized Menace: Max-Power Bracket 3": dict(_B3,
+        combo_max="S", combo_slots=2,
+        gc_target=3, max_extra_turns=1, max_tutors=4, budget=500, lands=35,
+        quotas=dict(ramp=12, draw=10, removal=8, counter=4, sweeper=2, recursion=2), slots=dict(fastmana=3), pop=1.5,
         avoid=set(),
-        blurb="Fast mana, tutors, Game Changers and proven staples. Built to win quickly (not a tournament cEDH list)."),
+        personality=dict(power=2.0, engine=1.0, mean=0.6, pressure=0.3, gentle=-0.2, chaos=-0.5),
+        blurb="As strong as Bracket 3 allows: 3 Game Changers, efficient staples and tutors. "
+              "Check two-card combos yourself (Commander Spellbook) to stay in Bracket 3."),
 }
 VIBE_LABELS = list(VIBES)
-DEFAULT_VIBE = "Competitive-Casual: Win and Have a Good Time (Bracket 3)"
+DEFAULT_VIBE = "Competitive-Casual: Win and Have a Good Time"
+# Labels from older versions of the form still work (e.g. a saved workflow URL)
+OLD_VIBE_NAMES = {
+    "Relaxed Casual (Bracket 2)": "Relaxed Casual",
+    "Social Table: Fun for Everyone (Bracket 2)": "Social Table: Fun for Everyone",
+    "Competitive-Casual: Win and Have a Good Time (Bracket 3)": DEFAULT_VIBE,
+    "Chaos & Memes: Chaotic Fun (Bracket 3)": "Chaos & Memes: Chaotic Fun",
+    "Table Threat: Scary to Play Against (Bracket 3)": "Table Threat: Scary to Play Against",
+    "Hostile Control: Stax & Hate (Bracket 4)": "Hostile Control: Stax & Hate",
+    "Optimized Menace: High Power (Bracket 4)": "Optimized Menace: Max-Power Bracket 3",
+}
+# Vibes where the commander itself should be mean (auto-pick only offers commanders that fit)
+MEAN_VIBES = {"Table Threat: Scary to Play Against", "Hostile Control: Stax & Hate"}
 
 # ----------------------------------------------------------------------------------------------
 # 2. Colors (exact color identity). Letters are always in WUBRG order.
@@ -211,6 +247,9 @@ _VT = {
                         r"target player sacrifices a land"],
     "theft": [r"gain control of (?:target|that|each|all)"],
     "discard": [r"(?:target (?:player|opponent)|each opponent) discards"],
+    "punish": [r"each opponent (?:loses|sacrifices|discards)", r"(?:opponents|your opponents) can't", r"whenever an opponent (?:casts|draws|activates|searches)[^.]{0,60}(?:loses|damage|you)",
+               r"deals? \w+ damage to each opponent", r"target opponent (?:loses|sacrifices|discards)", r"creatures your opponents control (?:get -|enter tapped)",
+               r"spells your opponents cast cost"],
 }
 _VT_RX = {k: re.compile("|".join(v), re.I) for k, v in _VT.items()}
 _ADDMANA = re.compile(r"add \{", re.I)
@@ -219,7 +258,7 @@ AVOID_WORDS = {   # keyword -> where to look: ("t", base tag from tags.py) or ("
     "stax": ("v", "stax"), "extra turns": ("t", "extra_turn"), "tutors": ("t", "tutor"),
     "counterspells": ("t", "counter"), "wipes": ("t", "sweeper"), "infect": ("v", "infect"),
     "land destruction": ("v", "landdestruction"), "theft": ("v", "theft"), "discard": ("v", "discard"),
-    "fast mana": ("v", "fastmana"),
+    "fast mana": ("v", "fastmana"), "combos": ("x", "combos"),
 }
 _AVOID_ALIASES = {
     "board wipes": "wipes", "wipe": "wipes", "wraths": "wipes", "wrath": "wipes", "sweepers": "wipes",
@@ -227,6 +266,7 @@ _AVOID_ALIASES = {
     "tutor": "tutors", "extra turn": "extra turns", "poison": "infect", "toxic": "infect",
     "ld": "land destruction", "steal": "theft", "threaten": "theft", "control magic": "theft",
     "hand disruption": "discard", "tax": "stax", "rocks": "fast mana", "moxen": "fast mana",
+    "combo": "combos", "infinite combos": "combos", "infinites": "combos", "infinite": "combos",
 }
 
 
@@ -269,6 +309,8 @@ def avoided(card, avoid):
     tags, vt = set(card["tags"]), None
     for word in avoid:
         kind, tag = AVOID_WORDS[word]
+        if kind == "x":
+            continue
         if kind == "t":
             if tag in tags:
                 return True

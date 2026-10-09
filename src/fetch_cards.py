@@ -14,9 +14,14 @@ def trim(c):
     text = c.get("oracle_text") or "\n".join(f.get("oracle_text", "") for f in faces)
     type_line = c.get("type_line") or " // ".join(f.get("type_line", "") for f in faces)
     mana_cost = c.get("mana_cost") or (faces[0].get("mana_cost", "") if faces else "")
+    front = faces[0] if faces else {}
+    flavor = c.get("flavor_text") or "\n".join(f.get("flavor_text", "") for f in faces if f.get("flavor_text"))
     d = {
         "name": c["name"], "cmc": c.get("cmc", 0), "mana_cost": mana_cost,
-        "type_line": type_line, "text": text,
+        "type_line": type_line, "text": text, "flavor": flavor,
+        # stats the deck builder compares cards on (front face for double-faced cards)
+        "power": c.get("power", front.get("power")), "toughness": c.get("toughness", front.get("toughness")),
+        "loyalty": c.get("loyalty", front.get("loyalty")), "keywords": c.get("keywords", []),
         "identity": c.get("color_identity", []), "produces": c.get("produces", []),
         "game_changer": bool(c.get("game_changer", False)),
         "rank": c.get("edhrec_rank"), "usd": (c.get("prices") or {}).get("usd"),
