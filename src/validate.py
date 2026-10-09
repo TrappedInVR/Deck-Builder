@@ -3,7 +3,8 @@ Anything that fails is reported in the run summary (and fails the regression tes
 can't hide behind one commander.
 
 Rules
-  1. exactly 100 cards               2. singleton (basics and "any number" cards excepted)
+  1. exactly 100 MAIN-DECK cards (Attractions, sticker sheets and cards that need them never count or get added)
+  2. singleton (basics and "any number" cards excepted)
   3. every card in the commander's color identity and Commander-legal (present in the card data)
   4. land count = the vibe's land target, counting EVERY land-type card (artifact lands included)
   5. no card that needs a color/basic type the deck can't have
@@ -14,6 +15,7 @@ import re
 
 import combos as K
 import lands as L
+from common import main_deck_card
 
 ANY_NUMBER = re.compile(r"a deck can have any number of cards named", re.I)
 
@@ -36,8 +38,11 @@ def check(idx, lines, cmd, plan, combo_db=None, max_tag="S", off_color=None):
     for n, name in deck:
         c = idx.get(name.lower())
         if c is None:
-            problems.append(f"{name}: not in the Commander-legal card data")
+            problems.append(f"{name}: not a main-deck Commander card (Attraction/sticker sheet/etc. or not legal), "
+                            f"so it can't count toward the 100")
             continue
+        if not main_deck_card(c):
+            problems.append(f"{name}: an Attraction/sticker-type card; it doesn't count toward the 100")
         basic = "Basic" in c["type_line"]
         if n > 1 and not basic and not ANY_NUMBER.search(c.get("text") or ""):
             problems.append(f"{name}: {n} copies in a singleton deck")

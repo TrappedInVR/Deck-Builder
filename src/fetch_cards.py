@@ -18,7 +18,7 @@ def trim(c):
     flavor = c.get("flavor_text") or "\n".join(f.get("flavor_text", "") for f in faces if f.get("flavor_text"))
     d = {
         "name": c["name"], "cmc": c.get("cmc", 0), "mana_cost": mana_cost,
-        "type_line": type_line, "text": text, "flavor": flavor,
+        "type_line": type_line, "text": text, "flavor": flavor, "layout": c.get("layout"),
         # stats the deck builder compares cards on (front face for double-faced cards)
         "power": c.get("power", front.get("power")), "toughness": c.get("toughness", front.get("toughness")),
         "loyalty": c.get("loyalty", front.get("loyalty")), "keywords": c.get("keywords", []),
@@ -62,7 +62,8 @@ def main(out="data/cards.json"):
     print(f"downloaded {len(raw)} cards", flush=True)
     keep = [trim(c) for c in raw
             if c.get("legalities", {}).get("commander") == "legal"
-            and c.get("layout") not in ("token", "art_series", "emblem", "double_faced_token")]
+            and c.get("layout") not in ("token", "art_series", "emblem", "double_faced_token", "sticker", "planar", "scheme",
+                                        "vanguard", "augment", "host")]
     flagged = sum(c["game_changer"] for c in keep)
     if flagged < 30:   # expected ~53; the flag is probably missing from the bulk data
         fb = {n.lower() for n in FALLBACK}
