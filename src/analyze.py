@@ -7,6 +7,9 @@ card SAYS; it can't discover combos nobody wrote a pattern for, so treat it as a
 import re
 from functools import lru_cache
 
+import abilities as AB
+import context as CX
+
 # ------------------------------------------------------------------------------------------------
 # Game plans. For each plan:
 #   cmd      = [(regex, weight)] evidence in the COMMANDER's text that it wants this plan
@@ -22,7 +25,8 @@ PLANS = {
         cmd=[(r"create[^.]{0,60}tokens?", 2), (r"tokens? you control", 2), (r"whenever (?:a|one or more) (?:creature )?tokens?", 3),
              (r"\bpopulate\b", 3), (r"for each (?:other )?creature you control", 1.5), (r"creatures you control get \+", 1.5)],
         feed=[r"create (?:a|an|one|two|three|four|five|x|\d+|that many)[^.]{0,50}creature tokens?", r"\bpopulate\b", r"\bamass\b",
-              r"\bfabricate\b", r"twice that many tokens", r"create[^.]{0,30}tokens? (?:that are|that's) copies"],
+              r"\bfabricate\b", r"twice that many (?:of those )?tokens", r"create[^.]{0,30}tokens? (?:that are|that's) copies",
+              r"tokens? (?:would be created )?under your control"],
         pay=[r"creatures you control get \+", r"for each creature you control", r"whenever (?:a|one or more) (?:creature )?tokens?",
              r"tokens? you control", r"\bconvoke\b"],
         mech="Tokens & Go-Wide", creatures=30,
@@ -30,7 +34,8 @@ PLANS = {
     "+1/+1 counters": dict(
         cmd=[(r"\+1/\+1 counters?", 2.5), (r"\bproliferate\b", 2.5), (r"counters? on (?:it|them|each)", 1)],
         feed=[r"put (?:a|an|one|two|three|x|that many|\w+) \+1/\+1 counters?", r"\bproliferate\b", r"\bevolve\b", r"\bbolster\b",
-              r"\badapt \d", r"\bmodular\b", r"\bundying\b", r"\boutlast\b", r"\bsupport \d", r"twice that many (?:\+1/\+1 )?counters"],
+              r"\badapt \d", r"\bmodular\b", r"\bundying\b", r"\boutlast\b", r"\bsupport \d", r"twice that many (?:\+1/\+1 )?counters",
+              r"\+1/\+1 counters? would be put", r"that many plus one", r"\briot\b", r"enters? with (?:a|an additional|\w+) (?:additional )?\+1/\+1 counters?"],
         pay=[r"(?:with|has) (?:a|one or more) \+1/\+1 counters? on (?:it|them)", r"for each \+1/\+1 counter",
              r"whenever (?:one or more )?\+1/\+1 counters? (?:are|is) put"],
         mech="+1/+1 Counters", creatures=30),
@@ -38,8 +43,9 @@ PLANS = {
         cmd=[(r"\bsacrifices? (?:a|another|an|one or more)", 2.5), (r"whenever (?:a|another|one or more)[^.]{0,40}(?:creatures?|permanents?)[^.]{0,30}(?:dies|die|put into a graveyard)", 3),
              (r"whenever you sacrifice", 3), (r"\bexploit\b", 2)],
         feed=[r"sacrifice (?:a|another|an)(?: \w+)? (?:creature|artifact|permanent)(?:[^.]{0,20}):", r"\bsacrifice (?:a|another) creature\b",
+              r"each player sacrifices (?:a|an|two) (?:creature|permanent)",
               r"create[^.]{0,50}creature tokens?", r"\bexploit\b", r"\bcasualty \d"],
-        pay=[r"whenever (?:a|another|one or more)[^.]{0,40}creatures?[^.]{0,30}(?:dies|die)", r"whenever you sacrifice",
+        pay=[r"whenever [^.]{0,40}\bcreatures?\b[^.]{0,30}\b(?:dies|die)\b", r"whenever you sacrifice",
              r"each opponent loses \w+ life", r"\bblitz\b"],
         mech="Sacrifice & Aristocrats", creatures=30),
     "Graveyard / self-mill / reanimation": dict(
@@ -47,7 +53,8 @@ PLANS = {
              (r"\bdelirium\b|\bthreshold\b|\bescape\b|\bunearth\b|\bdredge\b|\bflashback\b", 1.5), (r"creature cards? (?:in|from) (?:a|your) graveyard", 2)],
         feed=[r"\bmills?\b(?! target opponent)", r"put the top \w+ cards? of your library into your graveyard", r"\bdredge\b", r"\bsurveil\b",
               r"discard (?:a|two|any number of) cards?", r"\bself-mill\b", r"\bentomb\b", r"search your library for a card[^.]{0,30}into your graveyard"],
-        pay=[r"from your graveyard", r"from a graveyard", r"creature cards? in your graveyard", r"\bdelirium\b", r"\bthreshold\b", r"\bescape\b",
+        pay=[r"from your graveyard", r"from a graveyard", r"creature cards? in (?:your|a) graveyard", r"return enchanted creature card to the battlefield",
+             r"\bdelirium\b", r"\bthreshold\b", r"\bescape\b",
              r"\bflashback\b", r"\bunearth\b", r"\bembalm\b", r"\beternalize\b", r"\bdisturb\b", r"cards? in your graveyard"],
         mech="Graveyard & Reanimator",
         hate=[r"exile all (?:cards from all )?graveyards", r"(?:would be put into|would go to) (?:a|any) graveyard[^.]{0,40}exile it instead",
@@ -124,6 +131,7 @@ PLANS = {
         cmd=[(r"(?:deals?|damage)[^.]{0,30}(?:to )?each opponent", 3), (r"each opponent loses", 3), (r"noncombat damage", 3),
              (r"whenever an opponent (?:loses life|is dealt damage)", 3), (r"deals? \w+ damage to (?:any target|target (?:player|opponent))", 1.5)],
         feed=[r"deals? \w+ damage to each opponent", r"each opponent loses \w+ life", r"deals? \w+ damage to (?:any target|target player|each player)",
+              r"(?:that player|target opponent|target player|defending player) loses \w+ life",
               r"if a source you control would deal (?:noncombat )?damage[^.]{0,40}(?:double|plus)"],
         pay=[r"whenever an opponent (?:loses life|is dealt damage)", r"whenever a source you control deals noncombat damage"],
         mech="Group Slug & Burn"),
@@ -241,7 +249,7 @@ def creature_types(idx_cards):
 def _self_name_free(cmd):
     """Rules text with the card's own name replaced by '~' so 'Whenever Gorm attacks' reads as a self-trigger."""
     x = cmd.get("text") or ""
-    for n in {cmd["name"], cmd["name"].split(",")[0], cmd["name"].split(" // ")[0]}:
+    for n in sorted({cmd["name"], cmd["name"].split(" // ")[0], cmd["name"].split(",")[0]}, key=len, reverse=True):
         if n:
             x = x.replace(n, "~")
     return x
@@ -275,7 +283,28 @@ def typal_refs(cmd, all_types):
     return sorted({forms[m] for m in rx.findall(x)})
 
 
-def analyze(cmd, all_types=frozenset()):
+# Each strategy's style. The vibe's style weights (options.VIBES[...]["styles"]) decide which strategy leads.
+PLAN_STYLE = {
+    "Tokens / go wide": "gentle", "+1/+1 counters": "gentle", "Sacrifice / aristocrats": "punish",
+    "Graveyard / self-mill / reanimation": "engine", "Spellslinger (instants & sorceries)": "engine", "Artifacts": "engine",
+    "Enchantments": "gentle", "Lifegain": "gentle", "Lands / landfall / ramp": "gentle", "Enter-the-battlefield / blink": "engine",
+    "Voltron / equipment & auras": "aggro", "Combat / attack triggers": "aggro", "Card draw engine / wheels": "chaos",
+    "Discard / madness": "chaos", "Treasure / clues / food": "engine", "Burn / drain the table": "punish",
+    "Big creatures / power matters": "aggro", "Cast from exile / impulse draw": "chaos", "Legends / historic": "gentle",
+    "Tap & untap abilities": "engine", "Politics / goad / monarch": "hug", "Steal & copy opponents' stuff": "chaos",
+    "Mill your opponents": "control", "Dice & coin flips": "chaos", "Vehicles": "aggro", "Poison / proliferate": "punish",
+    "Superfriends (planeswalkers)": "control", "Clones & copies": "engine", "Big spells / X costs": "engine",
+    "Flash / opponents' turns": "control", "Creature spells matter": "gentle",
+}
+
+
+def _vibe_shift(weight, style, styles):
+    """The vibe re-weights plans by style, but never erases what the commander obviously does (floor 40%)."""
+    aff = (styles or {}).get(style or "", 0.0)
+    return round(max(weight * 0.4, weight * (1 + 0.6 * aff)), 2)
+
+
+def analyze(cmd, all_types=frozenset(), vibe=None):
     """Return the commander's game plan profile.
 
     plans:    [{name, weight, why}] strongest first (weight ~1..10)
@@ -290,8 +319,12 @@ def analyze(cmd, all_types=frozenset()):
         for r, wt in rx["cmd"]:
             m = r.search(x)
             if m:
-                w += wt
-                why.append(m.group(0).strip())
+                cw, _ = CX.judge(x, m.start(), m.end(), name)
+                if cw <= 0 and not CX._NEG_BEFORE.search(x[:m.start()][-40:].lower()):
+                    cw = 0.4               # e.g. "whenever a creature an opponent controls dies": related, but weaker
+                if cw > 0:
+                    w += wt * cw
+                    why.append(m.group(0).strip())
         if w:
             plans[name] = [w, why]
 
@@ -371,8 +404,33 @@ def analyze(cmd, all_types=frozenset()):
 
     if not ordered and is_creature and evasive and pw >= 3:
         ordered = [["Combat / attack triggers", 2.0, [f"{int(pw)}-power evasive body"]]]
-    out = [dict(name=n, weight=round(min(w, 10), 1), why=sorted(set(why), key=len)[:3]) for n, w, why in ordered[:6]]
-    return dict(plans=out, adjust=adjust, creatures=creatures, notes=notes,
+    styles = (vibe or {}).get("styles")
+    routes = [dict(name=n, base=round(min(w, 10), 1), style=PLAN_STYLE.get(n), why=sorted(set(why), key=len)[:3]) for n, w, why in ordered[:8]]
+    for r in routes:
+        r["weight"] = _vibe_shift(r["base"], r["style"], styles)
+    routes.sort(key=lambda r: -r["weight"])
+    out = [dict(name=r["name"], weight=r["weight"], why=r["why"], style=r["style"]) for r in routes[:6]]
+    lead_note = ""
+    if routes and styles:
+        natural = max(routes, key=lambda r: r["base"])
+        if natural["name"] != routes[0]["name"]:
+            lead_note = (f"This commander can be played several ways. Its most obvious plan is {natural['name']}, "
+                         f"but your vibe leads with {routes[0]['name']} ({routes[0]['style']}); the others stay in as support.")
+        else:
+            lead_note = f"Your vibe agrees with the commander's most obvious plan: {routes[0]['name']}."
+
+    # ability-by-ability interactions (abilities.py): enablers / fuel / payoffs / doublers for each ability
+    parsed = AB.parse(cmd)
+    inter = AB.interactions(parsed)
+    for p in inter:
+        p["base"] = p["weight"]
+        p["weight"] = _vibe_shift(p["weight"], p["style"], styles)
+    inter.sort(key=lambda p: -p["weight"])
+    return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8],
+                abilities=[dict(kind=a["kind"], text=a["text"], event=a["event"][1] if a["event"] else None,
+                                costs=[c[1] for c in a["costs"]], outputs=[o[1] for o in a["outputs"]], style=a["style"])
+                           for a in parsed],
+                adjust=adjust, creatures=creatures, notes=notes,
                 typal=typal_refs(cmd, all_types) if all_types else [], evasive=evasive, power=pw, toughness=tg, cmc=cmc)
 
 
@@ -387,27 +445,83 @@ def card_hits(card):
     key = card["name"]
     if key in _card_cache:
         return _card_cache[key]
-    x = card.get("text") or ""
+    x = _self_name_free(card)
     tl = card.get("type_line") or ""
-    hits, hate = {}, set()
+    hits, hate, filtered = {}, set(), {}
     for name, rx in _RX.items():
-        s = 0
+        s, why = 0.0, []
         if rx["feed"]:
-            s += min(len({m.group(0).lower() for m in rx["feed"].finditer(x)}), 2)
+            v, f = CX.weigh_matches(rx["feed"], x, name)      # fast keyword pass, then the context filter
+            s += v
+            why += f
         if rx["pay"]:
-            s += min(len({m.group(0).lower() for m in rx["pay"].finditer(x)}), 2) * 1.2
+            v, f = CX.weigh_matches(rx["pay"], x, name)
+            s += v * 1.2
+            why += f
         if rx["types"] and rx["types"].search(tl):
             s += 1
         if s:
             hits[name] = min(s, 3)
+        if why:
+            filtered[name] = why
         if rx["hate"] and rx["hate"].search(x):
             hate.add(name)
     _card_cache[key] = (hits, hate)
+    _filtered_cache[key] = filtered
     return hits, hate
 
 
+_filtered_cache = {}
+
+
+def filtered_hits(card):
+    """{plan: ["'keyword': reason", ...]} for hits the context filter discounted (for reports and tests)."""
+    card_hits(card)
+    return _filtered_cache.get(card["name"], {})
+
+
+_dyn_rx = {}
+_dyn_cache = {}
+
+
+def _compiled(patterns):
+    key = tuple(patterns)
+    if key not in _dyn_rx:
+        _dyn_rx[key] = re.compile("|".join(patterns), re.I) if patterns else None
+    return _dyn_rx[key]
+
+
+def interaction_hits(card, p):
+    """Strength 0..3 that this card enables / fuels / pays off one of the commander's specific abilities.
+    Same context filter as everything else: the card must do the thing for YOU."""
+    key = (card["name"], p["name"], tuple(p.get("feed") or ()), tuple(p.get("pay") or ()), p.get("types"))
+    if key in _dyn_cache:
+        return _dyn_cache[key]
+    x = _self_name_free(card)
+    ctx_plan = "Burn / drain the table" if p.get("style") == "punish" and "drain" in p["name"] else p["name"]
+    s = 0.0
+    fr = _compiled(p.get("feed") or [])
+    if fr:
+        s += CX.weigh_matches(fr, x, ctx_plan)[0]
+    pr = _compiled(p.get("pay") or [])
+    if pr:
+        s += CX.weigh_matches(pr, x, ctx_plan)[0] * 1.2
+    if p.get("types") and re.search(p["types"], card.get("type_line") or ""):
+        s += 1
+    _dyn_cache[key] = min(s, 3)
+    return _dyn_cache[key]
+
+
+def plan_hits(card, plan):
+    """Strength for either a strategy plan (by name) or an ability interaction plan (has its own patterns)."""
+    if "feed" in plan or "pay" in plan:
+        return interaction_hits(card, plan)
+    return card_hits(card)[0].get(plan["name"], 0)
+
+
 def synergy(card, profile, tribe_words=()):
-    """How much this card helps THIS commander's plans. Returns (score 0..~60, reason or '')."""
+    """How much this card helps THIS commander: its strategies AND its specific abilities.
+    Returns (score 0..~60, reason or '')."""
     hits, hate = card_hits(card)
     s, best, best_v = 0.0, "", 0.0
     for p in profile["plans"]:
@@ -419,6 +533,13 @@ def synergy(card, profile, tribe_words=()):
                 best, best_v = p["name"], v
         if p["name"] in hate:
             s -= 6 * p["weight"]
+    for p in profile.get("interactions", []):
+        h = interaction_hits(card, p)
+        if h:
+            v = h * p["weight"] * 1.6
+            s += v
+            if v > best_v:
+                best, best_v = p["name"], v
     # creature types the commander cares about (beyond the main tribe system)
     tl = card.get("type_line") or ""
     sub = tl.split("—", 1)[1] if "—" in tl else ""

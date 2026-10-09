@@ -48,7 +48,8 @@ RECURSION = re.compile(
 def tag(card):
     t, x = card["type_line"], (card.get("text") or "")
     tags = set()
-    if "Land" in t and not re.search(r"\b(?:Creature|Artifact|Instant|Sorcery)\b", t.split("//")[0]):
+    # artifact lands (Darksteel Citadel, Great Furnace...) ARE lands; land creatures (Dryad Arbor) and MDFC spells aren't
+    if "Land" in t.split("//")[0] and not re.search(r"\b(?:Creature|Instant|Sorcery)\b", t.split("//")[0]):
         tags.add("land")
     else:
         if RAMP_PERM.search(x) and re.search(r"\b(?:Artifact|Creature|Enchantment|Planeswalker)\b", t):

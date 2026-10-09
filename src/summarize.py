@@ -7,7 +7,7 @@ import sys
 ROLE_NAMES = dict(ramp="Ramp", draw="Card draw", removal="Removal", counter="Counterspells", sweeper="Board wipes",
                   recursion="Recursion", protection="Commander protection")
 STEP_ORDER = ["You asked for it", "Game Changer", "Ramp", "Card draw", "Removal", "Counterspells", "Board wipes",
-              "Recursion", "Commander protection", "Commander plan", "Creature base", "Vibe", "Your theme", "Tribe",
+              "Recursion", "Commander protection", "Commander plan", "Ability support", "Combo", "Creature base", "Vibe", "Your theme", "Tribe",
               "Best remaining fit"]
 
 
@@ -68,6 +68,12 @@ def main():
         print("\n".join(out))
         return
 
+    val = p.get("validation")
+    if val is not None:
+        A("**Deck check:** " + ("passed all rules (100 cards, singleton, colors, land count, no off-color cards, "
+                                "Game Changers, combos)." if not val else f"{len(val)} problem(s) found, listed in the notes above."))
+        A("")
+
     # ---- how the commander plays
     prof = p.get("profile") or {}
     A(f"### How {p['commander']} wants to win")
@@ -82,6 +88,33 @@ def main():
         A("- Its text has no specific engine, so the deck follows your themes and the vibe.")
     for n in prof.get("notes", []):
         A(f"- {n}")
+    A("")
+    abil = [a for a in prof.get("abilities", []) if a["kind"] != "keyword"]
+    if abil:
+        A("**Its abilities, one by one:**")
+        A("")
+        A("| Ability | Type | Waits for | Costs | Produces |\n|---|---|---|---|---|")
+        for ab in abil:
+            A(f"| {cell(ab['text'][:90])} | {ab['kind']} | {ab['event'] or '-'} | {', '.join(ab['costs']) or '-'} | "
+              f"{', '.join(ab['outputs']) or '-'} |")
+        A("")
+    routes = prof.get("routes") or []
+    if len(routes) > 1:
+        A("**Ways to play this commander** (the vibe picks the lead, the rest stay in as support):")
+        A("")
+        A("| Game plan | Style | From the card | After your vibe |\n|---|---|---|---|")
+        for i, r in enumerate(routes[:6]):
+            A(f"| {'**' + r['name'] + '** (lead)' if i == 0 else r['name']} | {r.get('style') or '-'} | {r['base']} | {r['weight']} |")
+        A("")
+    if prof.get("lead_note"):
+        A(f"_{prof['lead_note']}_")
+        A("")
+    inter = prof.get("interactions") or []
+    if inter:
+        A("**Cards chosen to work with its abilities:**")
+        A("")
+        for p_ in inter:
+            A(f"- {p_['name']}: **{p['plan_counts'].get(p_['name'], 0)}** cards")
     if prof.get("typal"):
         A(f"- Creature types it cares about: {', '.join(prof['typal'])}")
     A("")

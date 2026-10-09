@@ -89,7 +89,7 @@ def own_text(card):
     """Rules text with the card's own name replaced by '~', and planeswalker ultimates (-5 or worse) removed:
     you rarely get to use them, so they shouldn't make a card look like the best draw/removal spell."""
     x = card.get("text") or ""
-    for n in {card["name"], card["name"].split(",")[0], card["name"].split(" // ")[0]}:
+    for n in sorted({card["name"], card["name"].split(" // ")[0], card["name"].split(",")[0]}, key=len, reverse=True):
         if n:
             x = x.replace(n, "~")
     if "Planeswalker" in (card.get("type_line") or ""):

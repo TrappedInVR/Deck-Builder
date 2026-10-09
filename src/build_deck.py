@@ -24,6 +24,7 @@ import commanders as CM
 import evaluate as E
 import lands as L
 import options as O
+import validate as V
 from common import load_cards, pips
 
 BASICS = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
@@ -67,6 +68,31 @@ def land_makes(c, ident):
     if re.search(r"any color|any type|commander's color identity", x, re.I):
         s |= set(ident)
     return s & set(ident)
+
+
+_WORD_COLOR = {"plains": "W", "island": "U", "swamp": "B", "mountain": "R", "forest": "G",
+               "white": "W", "blue": "U", "black": "B", "red": "R", "green": "G"}
+# Things a card needs YOU to have: basic land types, colored permanents/spells, devotion. Hosers that target an
+# opponent's colors ("destroy target blue permanent") are not requirements and are judged by evaluate.py instead.
+_NEEDS = [
+    re.compile(r"\b(Plains|Island|Swamp|Mountain|Forest)s? (?:you control|cards? (?:in|from) your)", re.I),
+    re.compile(r"(?:if|as long as|unless) you control (?:an?|two or more|three or more|\w+) (Plains|Island|Swamp|Mountain|Forest)\b", re.I),
+    re.compile(r"\b(white|blue|black|red|green) (?:permanents?|creatures?|spells?|sources?|cards?) you (?:control|cast|own)", re.I),
+    re.compile(r"(?:if|as long as|unless) you control an? (white|blue|black|red|green) (?:permanent|creature)", re.I),
+    re.compile(r"whenever you cast an? (white|blue|black|red|green) spell", re.I),
+    re.compile(r"devotion to (white|blue|black|red|green)", re.I),
+]
+
+
+def off_color_lands(c, ident):
+    """True if the card needs a color or basic land type this deck can't have
+    (Vedalken Shackles in mono-red, 'Whenever you cast a blue spell' in Rakdos, devotion to green in Boros...).
+    A requirement counts as met if ANY of the colors it mentions is in the deck."""
+    x = c.get("text") or ""
+    need = set()
+    for rx in _NEEDS:
+        need |= {_WORD_COLOR[m.lower()] for m in rx.findall(x)}
+    return bool(need) and not (need & set(ident))
 
 
 def gc_ok(c):
@@ -141,7 +167,7 @@ def build(idx, cmd, plan):
     avoid = set(plan["avoid"]) | set(vibe["avoid"])
     budget, lands, max_gc = plan["budget"], plan["lands"], plan["max_gc"]
     gc_target = min(vibe["gc_target"], max_gc)
-    profile = A.analyze(cmd, all_types(idx))
+    profile = A.analyze(cmd, all_types(idx), vibe)
     if not profile["plans"] and mech and A.plan_for_theme(mech):
         # the commander has no engine of its own: your theme becomes the deck's plan
         profile["plans"] = [dict(name=A.plan_for_theme(mech), weight=3.0, why=[f"your {mech} theme (the commander has no engine of its own)"])]
@@ -156,7 +182,8 @@ def build(idx, cmd, plan):
             if set(c["identity"]) <= ident and c["name"] != cmd["name"]
             and c["name"].lower() not in excluded
             and "mass_land_denial" not in c["tags"]
-            and not O.avoided(c, avoid)]
+            and not O.avoided(c, avoid)
+            and not off_color_lands(c, ident)]
     nonland = [c for c in pool if "land" not in c["tags"]]
     for c in nonland:
         prepare(c, ctx)
@@ -178,6 +205,7 @@ def build(idx, cmd, plan):
     if cmd["game_changer"] and st["gc"] > max_gc:
         warnings.append(f"{cmd['name']} is itself a Game Changer, so this deck is at least Bracket 3.")
     top_plans = [p["name"] for p in profile["plans"]]
+    all_plans = profile["plans"] + profile.get("interactions", [])
 
     def add(c, step, reason):
         picked.append(c)
@@ -191,10 +219,9 @@ def build(idx, cmd, plan):
         st["narr"] += bool(narr and O.narr_score(c, narr) >= 2)
         st["members"] += is_member(c, tribe)
         st["onplan"] += c["_syn"] >= SYN_ON_PLAN
-        hits, _ = A.card_hits(c)
-        for p in top_plans:
-            if hits.get(p):
-                planc[p] += 1
+        for p in all_plans:
+            if A.plan_hits(c, p):
+                planc[p["name"]] += 1
 
     def remove(c):
         picked.remove(c)
@@ -208,10 +235,9 @@ def build(idx, cmd, plan):
         st["narr"] -= bool(narr and O.narr_score(c, narr) >= 2)
         st["members"] -= is_member(c, tribe)
         st["onplan"] -= c["_syn"] >= SYN_ON_PLAN
-        hits, _ = A.card_hits(c)
-        for p in top_plans:
-            if hits.get(p):
-                planc[p] -= 1
+        for p in all_plans:
+            if A.plan_hits(c, p):
+                planc[p["name"]] -= 1
 
     def blocked(c, creature_cap=None, force=False, rules_only=False):
         """Why a card can't go in right now ('' = it can). rules_only: ignore 'deck full' (for the close-calls report)."""
@@ -300,7 +326,7 @@ def build(idx, cmd, plan):
         for p in profile["plans"][:3]:
             target = max(4, round(total * p["weight"] / tw))
             have = lambda name=p["name"]: planc[name]
-            fill(nonland, lambda c, name=p["name"]: A.card_hits(c)[0].get(name) and c["_syn"] >= SYN_ON_PLAN,
+            fill(nonland, lambda c, pl=p: A.plan_hits(c, pl) and c["_syn"] >= SYN_ON_PLAN,
                  have, target, "Commander plan", lambda c, name=p["name"]: f"{name}: {E.describe(c)}")
         if typal:
             fill(nonland, lambda c: c["_syn_why"].endswith("(named by your commander)"),
@@ -308,6 +334,15 @@ def build(idx, cmd, plan):
                  "Commander plan", lambda c: c["_syn_why"])
     else:
         warnings.append("This commander has no specific engine in its text, so the deck follows your themes and the vibe.")
+
+    # 4-. ability support: every important ability of the commander gets cards that enable / fuel / pay it off
+    for p in profile.get("interactions", []):
+        if p["weight"] < 1.5:
+            continue
+        target = 6 if p["kind"] in ("enabler", "fuel") else 4
+        fill(nonland, lambda c, pl=p: A.interaction_hits(c, pl) > 0 and c["_q"] >= 35,
+             lambda pl=p: planc[pl["name"]], target, "Ability support",
+             lambda c, pl=p: f"{pl['name']} ({pl['why'][0][:60]}): {E.describe(c)}")
 
     # 4a. combos (Commander Spellbook): only ones this vibe allows, that run through the commander or its plan
     db = COMBO_DB
@@ -504,17 +539,19 @@ def build(idx, cmd, plan):
     total = 1 + len(picked) + len(nonbasic) + sum(basics.values())
     gc_cards = ([cmd["name"]] if cmd["game_changer"] else []) + \
         [c["name"] for c in picked + nonbasic if c["game_changer"]]
-    if total != 100:
-        warnings.append(f"Deck has {total} cards, not 100 (card pool too small for these filters).")
+    problems = V.check(idx, lines, cmd, plan, db, max_tag, off_color_lands)
+    for pr in problems:
+        warnings.append(f"Deck check: {pr}")
     avg_q = round(sum(c["_q"] for c in picked) / max(1, len(picked)), 1)
     return dict(lines=lines, total=total, spent=st["spent"], gc=len(gc_cards), gc_cards=gc_cards,
                 roles={r: tagc[r] for r in ROLE_KEYS}, quotas=quotas, tutors=tagc["tutor"], extra_turns=tagc["extra_turn"],
                 creatures=tagc["creature"], creature_cap=cap, members=st["members"], mech_hits=st["mech"], narr_hits=st["narr"],
-                onplan=st["onplan"], plan_counts={p: planc[p] for p in top_plans}, avg_quality=avg_q,
+                onplan=st["onplan"], plan_counts={p["name"]: planc[p["name"]] for p in all_plans}, avg_quality=avg_q,
                 nonbasic=len(nonbasic), land_pool=land_info["candidates"], warnings=warnings, land_cost=land_cost,
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
-                profile=profile, vibe_match=vmatch, natural_vibe=natural, report=report, edged=edged, combos=combo_info)
+                profile=profile, vibe_match=vmatch, natural_vibe=natural, report=report, edged=edged, combos=combo_info,
+                validation=problems)
 
 
 def lambda_reason(c):
@@ -672,7 +709,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 

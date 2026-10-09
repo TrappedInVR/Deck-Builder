@@ -35,7 +35,7 @@ TIER_NAMES = {0: "original dual", 1: "untapped dual", 2: "usually untapped dual"
 
 def _norm(card):
     x = card.get("text") or ""
-    for n in {card["name"], card["name"].split(",")[0], card["name"].split(" // ")[0]}:
+    for n in sorted({card["name"], card["name"].split(" // ")[0], card["name"].split(",")[0]}, key=len, reverse=True):
         if n:
             x = x.replace(n, "~")
     return x
@@ -66,7 +66,8 @@ def classify(card, ident):
     fetch = re.search(r"search your library for an? (\w+)(?:,| or) (?:an? )?(\w+)(?: or (\w+))? card", x, re.I)
     fetch_types = {BASIC_TYPES[t.title()] for t in (fetch.groups() if fetch else ()) if t and t.title() in BASIC_TYPES}
     useful = cols & ident
-    tapped = bool(re.search(r"enters(?: the battlefield)? tapped\.", x))
+    # any "enters tapped..." wording counts (incl. "enters tapped with two depletion counters"), except "...tapped unless"
+    tapped = bool(re.search(r"enters(?: the battlefield)? tapped(?! unless)", x)) or bool(re.search(r"doesn't untap during your untap step", x))
     strings = bool(re.search(r"spend this mana only|activate only|sacrifice ~ unless|sacrifice ~ at|sacrifice it unless|"
                              r"return a land you control to its owner's hand|can't be cast|an opponent creates", xl))
     cond_untapped = bool(re.search(r"enters(?: the battlefield)? tapped unless|you may pay 2 life\. if you don't", xl))
@@ -106,7 +107,9 @@ def classify(card, ident):
             return 2, "untapped dual", useful
         if re.search(r"\{[wubrg]/[wubrg]\}, \{t\}: add", xl) and len(set(re.findall(r"\{([WUBRG])\}", x)) & ident) >= 2:
             return 2, "filter land", ident
-    # everything else is a utility land
+    # everything else is a utility land (never an any-color land: in a one-color deck it's just a worse basic)
+    if anycolor or re.search(r"add one mana of any color|commander's color identity", xl):
+        return None
     if tapped or strings or re.search(r"onto the battlefield tapped", xl) or front_types:
         return None
     price = _price(card)
@@ -141,7 +144,7 @@ def choose(pool, ident, lands, synergy=lambda c: 0, popularity=lambda c: 0, max_
     for c in pool:
         if "Land" not in (c.get("type_line") or "") or "Basic" in c["type_line"]:
             continue
-        if re.search(r"\b(?:Creature|Artifact)\b", c["type_line"].split("//")[0]):
+        if re.search(r"\bCreature\b", c["type_line"].split("//")[0]):
             continue
         k = classify(c, ident)
         if k is None:

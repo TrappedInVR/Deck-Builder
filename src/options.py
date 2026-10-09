@@ -8,6 +8,8 @@ flavor text). It is deliberately simple and free. It finds cards that FIT a them
 understand deep synergies, so treat results as a strong draft."""
 import re
 
+import context as CX
+
 ANY = "Any (no preference)"
 
 # ----------------------------------------------------------------------------------------------
@@ -23,12 +25,15 @@ ANY = "Any (no preference)"
 # avoid       = things this vibe never includes (same words you can type in the Avoid box)
 # combo_max   = highest Commander Spellbook combo tag allowed (E/C/O = casual, P/S = Bracket 3). R is never allowed.
 # combo_slots = how many complete combos the builder actively adds (0 = only keep ones that happen naturally)
+# styles      = which kind of game plan this vibe leads with when a commander can be played several ways
+#               (gentle, engine, aggro, control, punish, hug, chaos). It shifts emphasis; it never ignores the commander.
 # personality = which commander traits fit this vibe (see analyze.TRAITS): mean, stax, chaos, hug,
 #               gentle, engine, power. Negative = commanders like that are a poor match.
 BRACKET = 3
 _B3 = dict(bracket=BRACKET, max_gc=3)
 VIBES = {
     "Relaxed Casual": dict(_B3,
+        styles=dict(gentle=1.0, engine=0.4, hug=0.3, aggro=0.1, punish=-0.6, control=-0.6, chaos=-0.2),
         combo_max="O", combo_slots=0,
         gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, lands=38,
         quotas=dict(ramp=10, draw=8, removal=5, counter=1, sweeper=1, recursion=2), slots={}, pop=0.7,
@@ -36,6 +41,7 @@ VIBES = {
         personality=dict(gentle=1.4, hug=0.4, engine=0.2, mean=-1.5, pressure=-0.4, stax=-2.0, chaos=-0.3),
         blurb="Build your board and enjoy it. Light interaction, no lockouts, games go long and everyone gets to play."),
     "Social Table: Fun for Everyone": dict(_B3,
+        styles=dict(hug=1.0, gentle=0.6, chaos=0.3, engine=0.2, punish=-0.6, control=-0.7),
         combo_max="O", combo_slots=0,
         gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, lands=37,
         quotas=dict(ramp=9, draw=8, removal=4, counter=0, sweeper=1, recursion=2),
@@ -44,6 +50,7 @@ VIBES = {
         personality=dict(hug=2.2, gentle=0.6, chaos=0.4, mean=-1.2, stax=-2.0),
         blurb="Generous, symmetrical and political cards that give the whole table something to do."),
     "Competitive-Casual: Win and Have a Good Time": dict(_B3,
+        styles=dict(engine=0.5, aggro=0.4, gentle=0.3, control=0.3, punish=0.3, chaos=-0.1),
         combo_max="P", combo_slots=1,
         gc_target=2, max_extra_turns=1, max_tutors=2, budget=500, lands=37,
         quotas=dict(ramp=10, draw=9, removal=7, counter=3, sweeper=2, recursion=2), slots={}, pop=1.0,
@@ -51,6 +58,7 @@ VIBES = {
         personality=dict(power=0.9, engine=0.6, gentle=0.3, pressure=0.3, mean=0.2, stax=-0.8, chaos=-0.2), bias=0.3,
         blurb="A real plan to win with real interaction, but nothing that locks players out of the game."),
     "Chaos & Memes: Chaotic Fun": dict(_B3,
+        styles=dict(chaos=1.0, hug=0.4, aggro=0.3, engine=0.1, control=-0.4),
         combo_max="O", combo_slots=1,
         gc_target=1, max_extra_turns=1, max_tutors=0, budget=500, lands=37,
         quotas=dict(ramp=9, draw=7, removal=5, counter=1, sweeper=1, recursion=2), slots=dict(chaos=14), pop=0.5,
@@ -58,6 +66,7 @@ VIBES = {
         personality=dict(chaos=2.6, hug=0.5, gentle=0.1, power=-0.3, stax=-1.0),
         blurb="Coin flips, swaps, wheels and wild effects. Unpredictable, but still a working deck."),
     "Table Threat: Scary to Play Against": dict(_B3,
+        styles=dict(punish=1.0, aggro=0.7, engine=0.4, control=0.3, hug=-0.5, gentle=-0.2),
         combo_max="S", combo_slots=1,
         gc_target=3, max_extra_turns=1, max_tutors=3, budget=500, lands=36,
         quotas=dict(ramp=11, draw=9, removal=8, counter=3, sweeper=2, recursion=2), slots=dict(punish=6), pop=1.2,
@@ -65,6 +74,7 @@ VIBES = {
         personality=dict(mean=1.6, pressure=0.7, power=1.0, engine=0.4, hug=-0.8, gentle=-0.3),
         blurb="Punishing and relentless: the commander makes opponents pay every turn, backed by heavy interaction."),
     "Hostile Control: Stax & Hate": dict(_B3,
+        styles=dict(control=1.0, punish=0.8, engine=0.3, hug=-0.7, gentle=-0.4, chaos=-0.3),
         combo_max="S", combo_slots=1,
         gc_target=3, max_extra_turns=0, max_tutors=2, budget=500, lands=36,
         quotas=dict(ramp=10, draw=9, removal=8, counter=5, sweeper=3, recursion=1), slots=dict(stax=7, punish=4), pop=1.0,
@@ -73,6 +83,7 @@ VIBES = {
         blurb="Taxes, restrictions, counterspells and sweepers that make everyone else's turn miserable. "
               "Still Bracket 3: no mass land denial, ever."),
     "Optimized Menace: Max-Power Bracket 3": dict(_B3,
+        styles=dict(engine=1.0, aggro=0.5, control=0.5, punish=0.4, chaos=-0.4, hug=-0.4),
         combo_max="S", combo_slots=2,
         gc_target=3, max_extra_turns=1, max_tutors=4, budget=500, lands=35,
         quotas=dict(ramp=12, draw=10, removal=8, counter=4, sweeper=2, recursion=2), slots=dict(fastmana=3), pop=1.5,
@@ -330,6 +341,11 @@ def _compile_mech():
 
 
 _MECH_RX = _compile_mech()
+# which context rules each theme uses (themes about hurting opponents accept opponent subjects)
+_MECH_PLAN = {"Group Slug & Burn": "Burn / drain the table", "Group Hug & Politics": "Politics / goad / monarch",
+              "Draw, Wheels & Discard": "Card draw engine / wheels", "Graveyard & Reanimator": "Graveyard / self-mill / reanimation",
+              "Tokens & Go-Wide": "Tokens / go wide", "Artifacts": "Artifacts", "Enchantress": "Enchantments",
+              "+1/+1 Counters": "+1/+1 counters", "Lifegain": "Lifegain"}
 def _word_rx(words):
     """Whole words with an optional plural; a trailing * means 'any word starting with this stem'."""
     parts = []
@@ -354,11 +370,11 @@ def mech_score(card, label):
     trx, tyrx = _MECH_RX[label]
     x = card.get("text") or ""
     n = 0
-    if trx:
-        n += len(set(m.group(0).lower() for m in trx.finditer(x)))
+    if trx:   # same context filter as the commander plans: skip negated, opponent-only and hate hits
+        n += CX.weigh_matches(trx, x, _MECH_PLAN.get(label, ""), cap=4)[0]
     if tyrx and tyrx.search(card.get("type_line") or ""):
         n += 1
-    _cache[key] = min(n, 4)
+    _cache[key] = min(round(n, 1), 4)
     return _cache[key]
 
 
