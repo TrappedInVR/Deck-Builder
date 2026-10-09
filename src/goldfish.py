@@ -14,7 +14,8 @@ def prep(deck, cards, tribe):
         info = {"name": c["name"], "cmc": int(c["cmc"]), "land": "land" in c["tags"],
                 "ramp": "ramp" in c["tags"] and c["cmc"] <= 4 and "land" not in c["tags"],
                 "bonus": 2 if "{C}{C}" in (c.get("text") or "") else 1,
-                "tribe": bool(tribe) and tribe.lower() in c["type_line"].lower() and "Creature" in c["type_line"]}
+                "tribe": bool(tribe) and "Creature" in c["type_line"] and any(
+                    re.search(r"\b%s\b" % re.escape(t.strip()), c["type_line"], re.I) for t in tribe.split("/") if t.strip())}
         if name == cmd_name:
             cmd = info
         else:
@@ -59,11 +60,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("deck"); ap.add_argument("--tribe", default="")
     ap.add_argument("--games", type=int, default=20000); ap.add_argument("--turns", type=int, default=10)
-    ap.add_argument("--big-spell", type=int, default=8, help="mana value of your biggest finisher")
+    ap.add_argument("--big-spell", type=int, default=None,
+                    help="mana value to track; default = the most expensive spell in the deck (no need to set it)")
     ap.add_argument("--cards", default="data/cards.json"); ap.add_argument("--json", default="out/goldfish.json")
     a = ap.parse_args()
     cards = load_cards(a.cards)
     lib, cmd = prep(parse_deck(a.deck), cards, a.tribe)
+    if a.big_spell is None:      # the deck's own most expensive spell (or the commander, if pricier), capped at 10
+        spells = [c["cmc"] for c in lib if not c["land"]] + ([cmd["cmc"]] if cmd else [])
+        a.big_spell = max(3, min(10, max(spells, default=6)))
     rng = random.Random(42)
     runs = [play_game(lib, cmd, rng, a.turns, a.big_spell) for _ in range(a.games)]
     def pct(f): return 100 * sum(1 for r in runs if f(r)) / len(runs)
@@ -71,7 +76,7 @@ def main():
         v = [r[k] for r in runs if r[k] is not None]
         return (statistics.mean(v), 100 * len(v) / len(runs)) if v else (None, 0)
     out = {
-        "games": a.games, "lands_in_deck": sum(c["land"] for c in lib) + 0,
+        "games": a.games, "lands_in_deck": sum(c["land"] for c in lib) + 0, "biggest_spell_mv": a.big_spell,
         "mulligan_rate_pct": pct(lambda r: r["mulls"] > 0),
         "3_lands_by_T3_pct": pct(lambda r: r["lands"][2] >= 3),
         "4_mana_by_T4_pct": pct(lambda r: r["mana"][3] >= 4),

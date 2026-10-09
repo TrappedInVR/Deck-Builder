@@ -10,6 +10,7 @@ import math
 import re
 
 import analyze as A
+import names as N
 import options as O
 
 BAD_TEXT = re.compile(r"choose a background|friends forever|doctor's companion", re.I)
@@ -20,40 +21,64 @@ def unique(idx):
 
 
 def detect_tribe(cmd):
-    """The commander's creature type, but ONLY if its rules text mentions that type
-    (e.g. 'Whenever a Frog you control attacks'). Otherwise '' = not a tribal commander."""
-    tl = cmd["type_line"]
-    if "—" not in tl:
-        return ""
-    text = re.sub(r"create[^.]*?tokens?", " ", A._self_name_free(cmd), flags=re.I)
-    for sub in tl.split("//")[0].split("—")[-1].split():
-        forms = {sub, sub + "s", sub + "es"}
-        if sub.endswith("f"):
-            forms.add(sub[:-1] + "ves")          # Elf -> Elves, Wolf -> Wolves
-        if sub.endswith("y"):
-            forms.add(sub[:-1] + "ies")
-        if re.search(r"\b(?:%s)\b" % "|".join(re.escape(f) for f in forms), text, re.I):
-            return sub
-    return ""
+    """The creature type(s) this commander SUPPORTS: its own type or a different one it enables
+    (Kykar -> Spirit, Tolsimir -> Wolf, Kaalia -> Angel/Demon/Dragon). '' if it doesn't care about any type.
+    Several types are joined with '/'."""
+    if A.ALL_TYPES:
+        types = A.cared_types(cmd)
+    else:      # type list not loaded yet: same "supports this type" rules, checked against its own types only
+        tl = cmd["type_line"].split("//")[0]
+        own = {w for w in tl.split("—", 1)[1].split() if w[:1].isupper()} if "—" in tl else set()
+        types = A.cared_types(cmd, own - A.NOT_CREATURE_TYPES) if own else []
+    return "/".join(types[:3])
+
+
+def tribe_types(tribe):
+    return [t.strip() for t in (tribe or "").split("/") if t.strip()]
 
 
 def _has_type(c, tribe):
+    """Commander fits a typed tribe if it IS that type, or supports it (Kykar fits 'Spirit')."""
     tl = c["type_line"]
     subtypes = tl.split("—", 1)[1] if "—" in tl else ""
-    return bool(re.search(r"\b%s\b" % re.escape(tribe), subtypes, re.I)) or "changeling" in (c.get("text") or "").lower()
+    want = [t.lower() for t in tribe_types(tribe)]
+    if any(re.search(r"\b%ss?\b" % re.escape(t), subtypes, re.I) for t in want) or "changeling" in (c.get("text") or "").lower():
+        return True
+    return bool(set(want) & {t.lower() for t in A.cared_types(c)})
+
+
+_RESOLVERS = {}
+
+
+def _resolver(idx, kind):
+    key = (id(idx), kind)
+    if key not in _RESOLVERS:
+        cards = [x for x in unique(idx) if x.get("can_be_commander")] if kind == "commander" else unique(idx)
+        _RESOLVERS[key] = N.Resolver([x["name"] for x in cards], {x["name"]: popularity(x) for x in cards})
+    return _RESOLVERS[key]
 
 
 def lookup(idx, name):
-    """Find a typed commander. On a miss, say what you probably meant instead of a bare error."""
+    """Find a typed commander. Misspelled or partial names become the closest real commander (never fails).
+    Returns (card, note) where note explains any correction for the run summary ('' if typed exactly)."""
     c = idx.get(name.strip().lower())
-    names = sorted(x["name"] for x in unique(idx) if x.get("can_be_commander"))
-    if c is None:
-        close = difflib.get_close_matches(name.strip(), names, n=5, cutoff=0.55)
-        hint = ("Did you mean: " + "; ".join(close)) if close else "Check the spelling (use the exact Scryfall card name)."
-        raise SystemExit(f"Commander not found, or not Commander-legal: {name!r}. {hint}")
-    if not c.get("can_be_commander"):
-        raise SystemExit(f"{c['name']} can't be a commander (it isn't a legendary creature).")
-    return c
+    if c is not None and c.get("can_be_commander"):
+        return c, ""
+    r = _resolver(idx, "commander").resolve(name)
+    c = idx[r["name"].lower()]
+    note = N.describe(r, "commander")
+    if c is not None and idx.get(name.strip().lower()) is not None and not idx[name.strip().lower()].get("can_be_commander"):
+        note = f"{idx[name.strip().lower()]['name']} can't be a commander (not a legendary creature); " + note
+    return c, note
+
+
+def resolve_card(idx, name, what="card"):
+    """Closest real (main-deck) card name for Must include / Exclude. Returns (card, note)."""
+    c = idx.get(name.strip().lower())
+    if c is not None:
+        return c, ""
+    r = _resolver(idx, "card").resolve(name)
+    return idx[r["name"].lower()], N.describe(r, what)
 
 
 def popularity(c):
@@ -74,7 +99,7 @@ def fit_row(c, *, mech=None, narr=None, tribe="", vibe_label=None, ref=None):
     reasons += O.explain(c, mech, narr)
     # 2. plan alignment: its engine IS the theme
     if mech:
-        al = sum(p["weight"] for p in prof["plans"] if A.PLANS[p["name"]].get("mech") == mech)
+        al = sum(p["weight"] for p in prof["plans"] if p["name"] in A.MECH_TO_PLANS.get(mech, []))
         if al:
             s += min(8 * al, 45)
             reasons.append(f"its own engine is {mech}")
@@ -95,9 +120,9 @@ def fit_row(c, *, mech=None, narr=None, tribe="", vibe_label=None, ref=None):
     # 5. tribe
     if tribe:
         ref = detect_tribe(c) if ref is None else ref
-        s += 40 if ref.lower() == tribe.lower() else 10
+        s += 40 if set(t.lower() for t in tribe_types(ref)) & set(t.lower() for t in tribe_types(tribe)) else 10
         if ref:
-            reasons.append(f"cares about {ref}s")
+            reasons.append(f"supports {ref.replace('/', ', ')}")
     # 6. a little popularity (proven commanders), scaled by the vibe
     s += pop * 0.4 * (vibe["pop"] if vibe else 1.0)
     top = prof["plans"][0]["name"] if prof["plans"] else "no specific engine"
@@ -112,6 +137,8 @@ def candidates(idx, *, colors=None, mech=None, narr=None, tribe="", vibe=None, v
     mech = None if mech in (None, "", O.ANY) else mech
     narr = None if narr in (None, "", O.ANY) else narr
     exclude = {e.lower() for e in exclude}
+    if not A.ALL_TYPES:
+        A.creature_types(unique(idx))
     pool = []
     for c in unique(idx):
         if not c.get("can_be_commander") or BAD_TEXT.search(c.get("text") or "") or c["name"].lower() in exclude:

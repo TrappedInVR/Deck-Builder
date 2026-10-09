@@ -234,6 +234,9 @@ NOT_CREATURE_TYPES = {"Equipment", "Vehicle", "Aura", "Food", "Treasure", "Clue"
                       "Junk", "Class", "Case", "Room", "Role", "Rune", "Background", "Cartouche", "Curse", "Shard", "Town", "Omen"}
 
 
+ALL_TYPES = set()          # filled the first time creature_types() runs (used by cared_types)
+
+
 def creature_types(idx_cards):
     """All creature subtypes that appear in the card pool (used to spot 'Dragons you control' etc.)."""
     out = set()
@@ -243,7 +246,9 @@ def creature_types(idx_cards):
             for half in tl.split("//"):
                 if "—" in half and "Creature" in half:
                     out.update(w for w in half.split("—", 1)[1].split() if w[:1].isupper())
-    return out - NOT_CREATURE_TYPES
+    out -= NOT_CREATURE_TYPES
+    ALL_TYPES.update(out)
+    return out
 
 
 def _self_name_free(cmd):
@@ -259,7 +264,7 @@ _TYPE_RX = {}
 
 
 def _type_rx(all_types):
-    key = len(all_types)
+    key = frozenset(all_types)
     if key not in _TYPE_RX:
         forms = {}
         for t in all_types:
@@ -302,6 +307,34 @@ def _vibe_shift(weight, style, styles):
     """The vibe re-weights plans by style, but never erases what the commander obviously does (floor 40%)."""
     aff = (styles or {}).get(style or "", 0.0)
     return round(max(weight * 0.4, weight * (1 + 0.6 * aff)), 2)
+
+
+_CARE = [r"{T}s? you control", r"\bother {T}s?\b", r"\bwhenever (?:a|an|another|one or more|each) (?:\w+ )?{T}s?\b",
+         r"\b{T} spells?\b", r"\b{T} (?:creature )?cards?\b", r"\bnumber of {T}s\b", r"\beach {T}\b",
+         r"\bsacrifice (?:a|an|another|\w+) {T}s?\b", r"\btarget {T}\b", r"\buntapped {T}s\b", r"\b{T}s get\b",
+         r"\b{T}s? (?:and|or) [A-Z]", r"\bchosen type\b", r"\bthat's an? {T}\b", r"creatures? (?:that are|that's) {T}s?\b"]
+
+
+def cared_types(cmd, all_types=None):
+    """Creature types this commander SUPPORTS, strongest first: its own type or a different one (Kykar -> Spirit,
+    Kaalia -> Angel/Demon/Dragon, Tolsimir -> Wolf). Types only named in tokens it creates don't count, nor 'non-X'."""
+    types = all_types or ALL_TYPES
+    if not types:
+        return []
+    x = re.sub(r"create[^.]*?tokens?", " ", _self_name_free(cmd), flags=re.I)
+    x = re.sub(r"\bnon-?[A-Z][a-z]+", " ", x)
+    rx, forms = _type_rx(frozenset(types))
+    own = set(re.findall(r"[A-Z][a-z]+", (cmd.get("type_line") or "").split("—", 1)[1])) if "—" in (cmd.get("type_line") or "") else set()
+    score = {}
+    for m in rx.finditer(x):
+        t = forms[m.group(1)]
+        around = x[max(0, m.start() - 45):m.end() + 60]
+        word = re.escape(m.group(1))
+        if any(re.search(p.replace("{T}s?", word + r"s?").replace("{T}s", word).replace("{T}", word), around, re.I) for p in _CARE) \
+                or re.search(r"(?:%s)(?:,| or)[^.]{0,40}(?:creature )?(?:card|spell)" % word, around) \
+                or re.search(r"(?:, | or |, or )(?:an? )?%s\b" % word, around):
+            score[t] = score.get(t, 0) + 1
+    return sorted(score, key=lambda t: (-score[t], t not in own, t))
 
 
 def analyze(cmd, all_types=frozenset(), vibe=None):
@@ -615,9 +648,48 @@ def fit_label(fit_value, is_best):
     return "stretch"
 
 
+# Mechanical-theme dropdown label -> the analyzer plan(s) that define it. Themes are matched with the SAME
+# context-aware patterns as the commander's plans (so "target player sacrifices" isn't an aristocrats card).
+MECH_TO_PLANS = {
+    "+1/+1 Counters": ["+1/+1 counters"],
+    "Tokens & Go-Wide": ["Tokens / go wide"],
+    "Sacrifice & Aristocrats": ["Sacrifice / aristocrats"],
+    "Graveyard & Reanimator": ["Graveyard / self-mill / reanimation"],
+    "Spellslinger": ["Spellslinger (instants & sorceries)"],
+    "Artifacts": ["Artifacts"],
+    "Enchantress": ["Enchantments"],
+    "Equipment & Auras (Voltron)": ["Voltron / equipment & auras"],
+    "Lifegain": ["Lifegain"],
+    "Landfall & Lands Matter": ["Lands / landfall / ramp"],
+    "Blink & Enter-the-Battlefield": ["Enter-the-battlefield / blink"],
+    "Treasure, Clues & Food": ["Treasure / clues / food"],
+    "Combat & Aggro": ["Combat / attack triggers"],
+    "Big Creatures & Stompy": ["Big creatures / power matters"],
+    "Group Slug & Burn": ["Burn / drain the table"],
+    "Group Hug & Politics": ["Politics / goad / monarch"],
+    "Card Draw & Wheels": ["Card draw engine / wheels"],
+    "Discard & Madness": ["Discard / madness"],
+    "Cast from Exile & Impulse Draw": ["Cast from exile / impulse draw"],
+    "Steal Your Opponents' Stuff": ["Steal & copy opponents' stuff"],
+    "Mill Your Opponents": ["Mill your opponents"],
+    "Poison & Proliferate": ["Poison / proliferate"],
+    "Superfriends (Planeswalkers)": ["Superfriends (planeswalkers)"],
+    "Vehicles": ["Vehicles"],
+    "Clones & Copies": ["Clones & copies"],
+    "Big Spells & X Costs": ["Big spells / X costs"],
+    "Flash & Instant-Speed": ["Flash / opponents' turns"],
+    "Legends Matter": ["Legends / historic"],
+    "Tap & Untap Engines": ["Tap & untap abilities"],
+    "Dice & Coin Flips": ["Dice & coin flips"],
+}
+
+
 def plan_for_theme(mech):
     """The game plan that matches a mechanical-theme dropdown (used when the commander has no engine of its own)."""
-    for name, p in PLANS.items():
-        if p.get("mech") == mech:
-            return name
-    return None
+    return (MECH_TO_PLANS.get(mech) or [None])[0]
+
+
+def theme_strength(card, mech):
+    """0..3: how strongly a card fits a mechanical theme (context-filtered, same rules as commander plans)."""
+    hits = card_hits(card)[0]
+    return max((hits.get(p, 0) for p in MECH_TO_PLANS.get(mech, [])), default=0)

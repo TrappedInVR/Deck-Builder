@@ -50,7 +50,9 @@ def judge(text, start, end, plan):
     clause, s, e = clause_around(text, start, end)
     cl = clause.lower()
     pre, post = cl[:s], cl[e:]
-    if _NEG_BEFORE.search(pre) or _NEG_AFTER.search(post):
+    # only the part of the sentence the hit belongs to: "If they don't, YOU create a Treasure" isn't negated
+    near = pre.rsplit(",", 1)[-1] if re.search(r"\b(?:if|unless|when|whenever)\b[^,]*,", pre) else pre
+    if _NEG_BEFORE.search(near) or _NEG_AFTER.search(post):
         return 0.0, "negated"
     if plan == GRAVEYARD and _GY_HATE.search(cl) and not _GY_OWN.search(cl):
         return 0.0, "graveyard hate"

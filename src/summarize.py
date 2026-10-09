@@ -241,6 +241,9 @@ def main():
           f"mulligan rate: {g['mulligan_rate_pct']:.0f}%")
         c = g["cmd_turn"]
         A(f"- Commander castable by turn {c['avg_turn']} on average ({c['reached_pct']}% of games)")
+        bg = g.get("big_turn") or {}
+        if g.get("biggest_spell_mv") and bg.get("avg_turn"):
+            A(f"- Biggest spell ({g['biggest_spell_mv']} mana) castable by turn {bg['avg_turn']} on average ({bg['reached_pct']}% of games)")
         A("")
     A("The full list is in the **deck-report** artifact (`deck.txt`, ready to paste into Moxfield with Bulk Edit).")
     print("\n".join(out))

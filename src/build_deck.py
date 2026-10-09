@@ -49,11 +49,22 @@ def price(c):
 
 
 def is_member(c, tribe):
-    """One definition of 'counts as the tribe', used for scoring AND counting (Changelings count)."""
+    """One definition of 'counts as the tribe', used for scoring AND counting. Works for one type or several
+    ('Angel/Demon/Dragon'), matches whole words only (so 'Ape' doesn't match 'Shapeshifter'); Changelings count."""
     if not tribe:
         return False
-    t, x = c["type_line"].lower(), (c.get("text") or "").lower()
-    return "creature" in t and (tribe.lower() in t or "changeling" in x)
+    tl = c["type_line"]
+    if "Creature" not in tl:
+        return False
+    sub = tl.split("—", 1)[1] if "—" in tl else ""
+    if "changeling" in (c.get("text") or "").lower():
+        return True
+    return any(re.search(r"\b%s\b" % re.escape(t), sub, re.I) for t in CM.tribe_types(tribe))
+
+
+def mentions_tribe(c, tribe):
+    x = c.get("text") or ""
+    return any(re.search(r"\b%s(?:s|es)?\b" % re.escape(t), x, re.I) for t in CM.tribe_types(tribe))
 
 
 def land_makes(c, ident):
@@ -109,6 +120,8 @@ _ALL_TYPES = {}
 
 def all_types(idx):
     k = id(idx)
+    if not A.ALL_TYPES:
+        A.creature_types(CM.unique(idx))
     if k not in _ALL_TYPES:
         _ALL_TYPES[k] = frozenset(A.creature_types(CM.unique(idx)))
     return _ALL_TYPES[k]
@@ -120,7 +133,7 @@ def theme_bonus(c, ctx):
     if ctx["tribe"]:
         if is_member(c, ctx["tribe"]):
             s += 45; why = f"{ctx['tribe']} (your tribe)"
-        elif ctx["tribe"].lower() in (c.get("text") or "").lower():
+        elif mentions_tribe(c, ctx["tribe"]):
             s += 20; why = f"{ctx['tribe']} support"
     if ctx["mech"]:
         m = O.mech_score(c, ctx["mech"])
@@ -171,12 +184,21 @@ def build(idx, cmd, plan):
     if not profile["plans"] and mech and A.plan_for_theme(mech):
         # the commander has no engine of its own: your theme becomes the deck's plan
         profile["plans"] = [dict(name=A.plan_for_theme(mech), weight=3.0, why=[f"your {mech} theme (the commander has no engine of its own)"])]
-    typal = [t for t in profile["typal"] if not tribe or t.lower() != tribe.lower()]
+    typal = [t for t in profile["typal"] if t.lower() not in {x.lower() for x in CM.tribe_types(tribe)}]
     fit, natural, _raw = A.vibe_fit(cmd, O.VIBES)
     vmatch = A.fit_label(fit[plan["vibe_label"]], natural == plan["vibe_label"])
     ctx = dict(tribe=tribe, vibe=vibe, vibe_label=plan["vibe_label"], mech=mech, narr=narr, profile=profile, typal=typal)
-    excluded = {n.lower() for n in plan["exclude"]}
     warnings = list(plan.get("warnings", []))
+    # typed card names: use the closest real card if the spelling is off
+    for key, what in (("must", "Must include"), ("exclude", "Exclude")):
+        fixed = []
+        for n in plan[key]:
+            c, fix = CM.resolve_card(idx, n, f"{what} card")
+            fixed.append(c["name"])
+            if fix and fix not in warnings:
+                warnings.append(fix)
+        plan[key] = fixed
+    excluded = {n.lower() for n in plan["exclude"]}
 
     pool = [c for c in CM.unique(idx)
             if set(c["identity"]) <= ident and c["name"] != cmd["name"]
@@ -602,6 +624,7 @@ def base_plan(a, vibe_label, mech, narr):
 
 
 def theme(label):
+    label = O.OLD_MECH_NAMES.get(label, label)
     return None if label in (None, "", O.ANY) else label
 
 
@@ -612,6 +635,7 @@ def pick_from(rows, a, rng):
 
 
 def resolve_normal(a, idx, rng):
+    all_types(idx)                      # creature-type list first, so tribe detection sees every type
     vibe_label = O.OLD_VIBE_NAMES.get(a.vibe, a.vibe) or O.DEFAULT_VIBE
     mech, narr = theme(a.mech), theme(a.narr)
     plan = base_plan(a, vibe_label, mech, narr)
@@ -621,12 +645,16 @@ def resolve_normal(a, idx, rng):
     top = 25 if a.suggest_only else 15
     rows, note = [], ""
     if a.commander.strip():
-        cmd, how = CM.lookup(idx, a.commander), "typed by you (dropdown commander choices ignored)"
+        cmd, fix = CM.lookup(idx, a.commander)
+        how = "typed by you (dropdown commander choices ignored)"
+        if fix:
+            plan["warnings"].append(fix)
+            how = "closest match to what you typed"
         if colors is not None and set(cmd["identity"]) != colors:
             plan["warnings"].append("Colors dropdown ignored because you typed a commander.")
             plan["colors_filter"] = None
     else:
-        rows, note = CM.candidates(idx, colors=colors, mech=mech, narr=narr, tribe=a.tribe.strip(),
+        rows, note = CM.candidates(idx, colors=colors, mech=mech, narr=narr, tribe=fix_tribe(idx, a.tribe, plan) if a.tribe.strip() else "",
                                    vibe=plan["vibe"], vibe_label=plan["vibe_label"], avoid=avoid_all, top=top)
         pick = pick_from(rows, a, rng)
         if not pick:
@@ -634,18 +662,37 @@ def resolve_normal(a, idx, rng):
         cmd = idx[pick["name"].lower()]
         how = ("random pick from the top 10 matches" if a.pick_mode.startswith("Random") else "best match")
     if a.tribe.strip():
-        plan["tribe"], plan["tribe_mode"] = a.tribe.strip(), "explicit"
+        plan["tribe"], plan["tribe_mode"] = fix_tribe(idx, a.tribe, plan), "explicit"
     else:
+        all_types(idx)
         plan["tribe"] = CM.detect_tribe(cmd)
         plan["tribe_mode"] = "auto" if plan["tribe"] else "off"
     return cmd, plan, how, rows, note
 
 
+def fix_tribe(idx, typed, plan):
+    """'elfs', 'zombie', 'Angel, demon' -> real creature types (closest match), joined with '/'."""
+    import names as N
+    types = sorted(all_types(idx))
+    R = N.Resolver(types)
+    out = []
+    for part in re.split(r"[/,;&]| and | or ", typed):
+        part = part.strip()
+        if not part:
+            continue
+        r = R.resolve(re.sub(r"(?:ies)$", "y", re.sub(r"(?:ves)$", "f", part)).rstrip("s") if len(part) > 3 else part)
+        out.append(r["name"])
+        if r["name"].lower() != part.lower().rstrip("s"):
+            plan["warnings"].append(f"Tribe: you typed {part!r}; using **{r['name']}**.")
+    return "/".join(dict.fromkeys(out))
+
+
 def resolve_random(a, idx, rng):
     """Functional-but-weird: random vibe, colors, mechanical + narrative theme, and a 1-in-10 chance
-    of a tribal deck (in which case the tribe is the commander's own type, linked to the commander).
+    of a tribal deck (in which case the tribe is the type(s) the commander supports, linked to the commander).
     The tribal roll and the vibe are rolled ONCE; only colors/themes are re-rolled while hunting for a
     combination that makes a balanced deck, so retries can't bias the odds."""
+    all_types(idx)                      # creature-type list first, so tribe detection sees every type
     typed = a.commander.strip()
     user_avoid, _ = O.parse_avoid(a.avoid)
     tribal_roll = True if a.tribe.strip() else rng.random() < 0.10
@@ -658,7 +705,10 @@ def resolve_random(a, idx, rng):
             plan = base_plan(a, vibe_label, mech, narr)
             avoid_all = user_avoid | set(plan["vibe"]["avoid"])
             if typed:
-                cmd, rows, note, how = CM.lookup(idx, typed), [], "", "typed by you (randomized the rest)"
+                cmd, fix = CM.lookup(idx, typed)
+                rows, note, how = [], "", "typed by you (randomized the rest)"
+                if fix:
+                    plan["warnings"].append(fix)
                 if tribal and not a.tribe.strip() and not CM.detect_tribe(cmd):
                     tribal = False
             else:
@@ -673,7 +723,7 @@ def resolve_random(a, idx, rng):
                 how = "randomized" + (" (tribal roll, 1 in 10)" if tribal else "")
                 plan["colors_filter"] = O.parse_colors(colors_label)
             if a.tribe.strip():
-                plan["tribe"], plan["tribe_mode"] = a.tribe.strip(), "explicit"
+                plan["tribe"], plan["tribe_mode"] = fix_tribe(idx, a.tribe, plan), "explicit"
             elif tribal:
                 plan["tribe"], plan["tribe_mode"] = CM.detect_tribe(cmd), "auto"
             res = build(idx, cmd, plan)

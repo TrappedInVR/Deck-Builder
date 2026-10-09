@@ -8,6 +8,7 @@ flavor text). It is deliberately simple and free. It finds cards that FIT a them
 understand deep synergies, so treat results as a strong draft."""
 import re
 
+import analyze as A
 import context as CX
 
 ANY = "Any (no preference)"
@@ -145,55 +146,12 @@ def random_color_label(rng):
 # ----------------------------------------------------------------------------------------------
 # 3. Mechanical themes. text = regexes over rules text; types = regexes over the type line.
 # ----------------------------------------------------------------------------------------------
-_MECH = {
-    "+1/+1 Counters": dict(text=[r"\+1/\+1 counter", r"\bproliferate\b", r"\bevolve\b", r"\bbolster\b",
-                                 r"\badapt\b", r"\bsupport \d", r"\bmentor\b", r"\bmodular\b", r"\bundying\b"]),
-    "Spellslinger": dict(text=[r"instant or sorcery", r"\bmagecraft\b", r"\bprowess\b",
-                               r"copy target (?:instant|sorcery)", r"whenever you cast a noncreature",
-                               r"\bstorm\b", r"\bflashback\b", r"\bcast (?:an? )?(?:instant|sorcery)"],
-                         types=[r"\b(?:Instant|Sorcery)\b"]),
-    "Tokens & Go-Wide": dict(text=[r"create (?:a|an|one|two|three|four|x|\d+|that many)[^.]{0,40}token",
-                                   r"\bpopulate\b", r"tokens? you control", r"creatures you control get \+",
-                                   r"\bamass\b", r"\bfabricate\b", r"\bconvoke\b"]),
-    "Sacrifice & Aristocrats": dict(text=[r"sacrifice (?:a|another|an|two|x)[^.]{0,30}(?:creature|artifact|permanent)",
-                                          r"whenever (?:a|another)[^.]{0,30}creature[^.]{0,20}dies",
-                                          r"whenever you sacrifice", r"\bexploit\b", r"each opponent loses"]),
-    "Graveyard & Reanimator": dict(text=[r"from your graveyard", r"\bmill\b", r"\bdelirium\b", r"\bunearth\b",
-                                         r"\bescape\b", r"\bdredge\b", r"\bembalm\b", r"\bdisturb\b",
-                                         r"creature card from a graveyard onto the battlefield"]),
-    "Artifacts": dict(text=[r"artifacts? you control", r"\baffinity for artifacts\b", r"\bimprovise\b",
-                            r"whenever an artifact", r"\bmetalcraft\b", r"\bfabricate\b"],
-                      types=[r"\bArtifact\b"]),
-    "Enchantress": dict(text=[r"enchantments? you control", r"\bconstellation\b", r"whenever an enchantment",
-                              r"\bbestow\b", r"\bsaga\b"],
-                        types=[r"\bEnchantment\b"]),
-    "Lifegain": dict(text=[r"gains? \w+ life", r"\blifelink\b", r"whenever you gain life", r"\bextort\b"]),
-    "Landfall & Lands Matter": dict(text=[r"\blandfall\b", r"whenever a land enters", r"additional land",
-                                          r"put (?:a|up to \w+) land cards? (?:from|onto)",
-                                          r"search your library for (?:a|up to \w+) (?:basic )?land",
-                                          r"lands you control"]),
-    "Blink & Value": dict(text=[r"exile (?:up to \w+ )?(?:another )?(?:target )?(?:nontoken )?creatures? you control[^.]{0,40}return",
-                                r"\bblink\b", r"\bflicker\b", r"whenever (?:a|another)[^.]{0,30}enters the battlefield under your control",
-                                r"\bsoulbond\b"]),
-    "Equipment & Auras (Voltron)": dict(text=[r"\bequipped creature\b", r"\benchanted creature\b", r"\battach\b", r"\bequip\b"],
-                                        types=[r"\bEquipment\b", r"\bAura\b"]),
-    "Treasure & Clues": dict(text=[r"\btreasure\b", r"\bclue\b", r"\bfood\b", r"\bblood token\b", r"\bincubate\b"]),
-    "Group Slug & Burn": dict(text=[r"deals? \w+ damage to each opponent", r"each opponent loses \w+ life",
-                                    r"deals? \w+ damage to each (?:other )?(?:creature|player|opponent)",
-                                    r"whenever an opponent[^.]{0,30}(?:takes|is dealt) damage"]),
-    "Group Hug & Politics": dict(text=[r"each player (?:may )?(?:draws?|gains?|puts?|searches|untaps)",
-                                       r"\bmonarch\b", r"\bgoad\b", r"\bvote\b", r"will of the council",
-                                       r"council's dilemma", r"target opponent (?:chooses|gains|draws)", r"\bdonate\b"]),
-    "Combat & Aggro": dict(text=[r"whenever [^.]{0,40}attacks", r"\bhaste\b", r"\bdouble strike\b",
-                                 r"additional combat phase", r"\bbattle cry\b", r"\bmyriad\b", r"\bexalted\b", r"\bmenace\b"]),
-    "Draw, Wheels & Discard": dict(text=[r"each player discards (?:their|all) hand", r"\bwheel\b", r"whenever you draw",
-                                         r"draw (?:two|three|x|that many) cards", r"\bmadness\b", r"\bcycling\b"]),
-    "Big Creatures & Stompy": dict(text=[r"power (?:\d+|x) or greater", r"\btrample\b", r"\bfights?\b",
-                                         r"\bmonstrosity\b", r"greatest power"]),
-}
-MECH_LABELS = [ANY] + list(_MECH)
+# Mechanical themes are defined by the analyzer's game plans (analyze.MECH_TO_PLANS), so a theme card is judged
+# with the same context filter as the commander: it has to genuinely do the thing for you.
+MECH_LABELS = [ANY] + list(A.MECH_TO_PLANS)
 # Typical creature counts differ by plan; a Spellslinger deck with 38 creatures is not a Spellslinger deck.
-MECH_MAX_CREATURES = {"Spellslinger": 16, "Enchantress": 20, "Equipment & Auras (Voltron)": 22,
+MECH_MAX_CREATURES = {"Spellslinger": 16, "Enchantress": 20, "Equipment & Auras (Voltron)": 22, "Superfriends (Planeswalkers)": 20,
+                      "Card Draw & Wheels": 24, "Flash & Instant-Speed": 20, "Big Spells & X Costs": 22, "Vehicles": 24,
                       "Artifacts": 26, "Group Hug & Politics": 24, "Draw, Wheels & Discard": 24}
 DEFAULT_MAX_CREATURES, TRIBAL_MAX_CREATURES = 30, 40
 
@@ -233,6 +191,28 @@ _NARR = {
     "War Hosts (Goblins, Orcs & Warriors)": dict(types=["Goblin", "Orc", "Warrior", "Barbarian", "Ogre", "Giant", "Berserker"],
                                                  words=["raid", "horde", "war", "rampage", "clan", "battle", "siege", "smash", "bloodthirst"]),
 }
+_NARR.update({
+    "Wild West Outlaws": dict(types=["Mercenary", "Rogue", "Warlock", "Assassin", "Lizard", "Coyote"],
+                              words=["outlaw", "bounty", "saloon", "desert", "sheriff", "gunslinger", "posse", "frontier", "canyon",
+                                     "train", "duel", "showdown", "gold", "mesa"]),
+    "Samurai & Ninjas": dict(types=["Samurai", "Ninja", "Kami", "Fox", "Moonfolk", "Monk"],
+                             words=["katana", "shogun", "dojo", "honor", "shrine", "kami", "blade", "lantern", "cherry", "petal",
+                                    "temple", "neon"]),
+    "Frost & Winter": dict(types=["Yeti", "Wolf", "Giant", "Bear"], supertypes=["Snow"],
+                           words=["ice", "frost", "snow", "winter", "frozen", "glacier", "cold", "rime", "blizzard", "tundra",
+                                  "chill", "hoarfrost"]),
+    "Myths & Gods": dict(types=["God", "Demigod", "Hydra", "Satyr", "Centaur", "Minotaur", "Nymph", "Siren"],
+                         words=["oracle", "hero", "nyx", "temple", "myth", "titan", "olympus", "pantheon", "omen", "prophecy",
+                                "divine", "fate"]),
+    "Sun, Moon & Stars": dict(types=["Archon", "Sphinx"],
+                              words=["sun", "moon", "star", "eclipse", "dawn", "dusk", "celestial", "night", "sky", "constellation",
+                                     "comet", "lunar", "solar", "astral"]),
+})
+# Words that are ALSO game terms: in RULES text they describe mechanics, not flavor, so only the card's name and
+# flavor text count for them (e.g. "spell" for wizards, "treasure" for pirates, "blood" for vampires).
+GAME_TERMS = {"spell", "treasure", "blood", "battle", "war", "burn", "fire", "copy", "wish", "lesson", "study", "light",
+              "curse", "shadow", "wild", "root", "seed", "night", "sky", "fate", "omen", "temple", "train", "gold", "dream",
+              "secret", "vault", "engine", "hero", "pack", "wave", "tide", "web", "nest", "trick", "blessing"}
 NARR_LABELS = [ANY] + list(_NARR)
 
 # ----------------------------------------------------------------------------------------------
@@ -332,20 +312,6 @@ def avoided(card, avoid):
     return False
 
 
-def _compile_mech():
-    out = {}
-    for label, spec in _MECH.items():
-        out[label] = (re.compile("|".join(spec.get("text", [])), re.I) if spec.get("text") else None,
-                      re.compile("|".join(spec["types"])) if spec.get("types") else None)
-    return out
-
-
-_MECH_RX = _compile_mech()
-# which context rules each theme uses (themes about hurting opponents accept opponent subjects)
-_MECH_PLAN = {"Group Slug & Burn": "Burn / drain the table", "Group Hug & Politics": "Politics / goad / monarch",
-              "Draw, Wheels & Discard": "Card draw engine / wheels", "Graveyard & Reanimator": "Graveyard / self-mill / reanimation",
-              "Tokens & Go-Wide": "Tokens / go wide", "Artifacts": "Artifacts", "Enchantress": "Enchantments",
-              "+1/+1 Counters": "+1/+1 counters", "Lifegain": "Lifegain"}
 def _word_rx(words):
     """Whole words with an optional plural; a trailing * means 'any word starting with this stem'."""
     parts = []
@@ -361,37 +327,38 @@ _NARR_RX = {
 
 
 def mech_score(card, label):
-    """How many distinct mechanical hooks of this theme the card has (type match counts as 1)."""
+    """0..3: how strongly a card fits a mechanical theme (context-filtered analyzer plans)."""
     if not label or label == ANY:
         return 0
     key = ("m", card["name"], label)
-    if key in _cache:
-        return _cache[key]
-    trx, tyrx = _MECH_RX[label]
-    x = card.get("text") or ""
-    n = 0
-    if trx:   # same context filter as the commander plans: skip negated, opponent-only and hate hits
-        n += CX.weigh_matches(trx, x, _MECH_PLAN.get(label, ""), cap=4)[0]
-    if tyrx and tyrx.search(card.get("type_line") or ""):
-        n += 1
-    _cache[key] = min(round(n, 1), 4)
+    if key not in _cache:
+        _cache[key] = A.theme_strength(card, label)
     return _cache[key]
 
 
 def narr_score(card, label):
-    """Narrative fit: 3 per creature-type hit, 2 for a name word, 1 for a rules/flavor word (capped)."""
+    """Narrative fit (flavor, not mechanics):
+         creature type in the theme  3 each (max 2 types)    supertype (e.g. Snow)  2
+         theme word in the card NAME 2 each (max 2)           theme word in FLAVOR text 1.5 each (max 2)
+         theme word in RULES text    1 each (max 2), but never for words that are also game terms (spell, treasure...)
+       A card fits at 2+."""
     if not label or label == ANY:
         return 0
     key = ("n", card["name"], label)
     if key in _cache:
         return _cache[key]
+    spec = _NARR[label]
     types_rx, words_rx = _NARR_RX[label]
     tl = card.get("type_line") or ""
     subtypes = tl.split("—", 1)[1] if "—" in tl else ""
     s = 3 * min(len(set(types_rx.findall(subtypes))), 2)
-    s += 2 * min(len(set(m.group(0).lower() for m in words_rx.finditer(card["name"]))), 2)
-    body = (card.get("text") or "") + " " + (card.get("flavor") or "")
-    s += min(len(set(m.group(0).lower() for m in words_rx.finditer(body))), 3)
+    if any(st in tl.split("—")[0] for st in spec.get("supertypes", [])):
+        s += 2
+    s += 2 * min(len({m.group(0).lower() for m in words_rx.finditer(card["name"])}), 2)
+    s += 1.5 * min(len({m.group(0).lower() for m in words_rx.finditer(card.get("flavor") or "")}), 2)
+    rules = {m.group(0).lower() for m in words_rx.finditer(card.get("text") or "")}
+    rules = {w for w in rules if w.rstrip("s") not in GAME_TERMS and w not in GAME_TERMS}
+    s += min(len(rules), 2)
     _cache[key] = s
     return s
 
@@ -407,3 +374,5 @@ def explain(card, mech, narr):
 
 
 PICK_MODES = ["Best match", "Random from top 10 matches"]
+OLD_MECH_NAMES = {"Blink & Value": "Blink & Enter-the-Battlefield", "Treasure & Clues": "Treasure, Clues & Food",
+                  "Draw, Wheels & Discard": "Card Draw & Wheels"}
