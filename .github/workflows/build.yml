@@ -145,7 +145,7 @@ on:
         required: false
         default: ""
       budget:
-        description: "11. Budget in $ for the nonland cards (optional, max 500). Lands never count."
+        description: "11. Budget in $ for the nonland cards (optional, max 1000). Blank = $500, and stronger vibes may stretch above it (up to $1000) only for cards worth it. A number you type is a hard cap. Lands never count."
         required: false
         default: ""
       randomize:
