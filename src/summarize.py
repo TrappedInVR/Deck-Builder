@@ -220,6 +220,26 @@ def main():
         A("")
 
     cb = p.get("combos") or {}
+    ref = p.get("reference")
+    if ref:
+        src = []
+        if ref.get("edhtop16_decks"):
+            src.append(f"{ref['edhtop16_decks']} tournament decklists for this commander from [EDHTop16](https://edhtop16.com)")
+        if ref.get("precons"):
+            src.append(f"the official precon ({', '.join(ref['precons'][:2])}, via [MTGJSON](https://mtgjson.com))")
+        if ref.get("user"):
+            src.append(f"your {ref['user']} reference cards")
+        A("### Real-deck reference")
+        A("")
+        if src:
+            A("Cards that real decks run with this commander were favored, using " + "; ".join(src) + ". "
+              f"{len(ref.get('in_deck') or [])} of them made the deck"
+              + (f": {', '.join(ref['in_deck'][:15])}" if ref.get("in_deck") else "") + ". Every one still passed the "
+              "Bracket 3, budget and color checks.")
+        else:
+            A("No reference data for this commander (no tournament results, no precon, no Reference cards typed), "
+              "so the deck relies on its own card reading and the simulation.")
+        A("")
     sim = p.get("simulation")
     if sim:
         sp = sim["spread"]

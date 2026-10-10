@@ -27,6 +27,7 @@ import speed as SP
 import strategy as ST
 import cardfn as CF
 import sim as SIM
+import reference as RF
 import evaluate as E
 import lands as L
 import options as O
@@ -47,6 +48,7 @@ SUB_MARGIN = 10         # a synergy card may replace a staple only if it is at m
 STAPLE_ROLES = ("ramp", "draw", "removal", "sweeper")   # staples first in these slots (see staple_first_fill)
 STAPLE_Q_ALONE = 90     # ... or so efficient it's a staple whatever its popularity
 LINK_W = 12             # value of one full link to the rest of the deck (cardfn.DeckWeb), in card-score points
+REF_W = 22              # synergy points for a card real decks run with this commander (reference.py), at full score
 SIM_GAMES = 400         # games per deck version in the simulator (same shuffles for every version)
 SIM_SWAPS = 8           # at most this many simulator swaps per deck
 SIM_GAIN = 0.08         # a swap must make the deck kill at least this many turns faster on average
@@ -170,6 +172,14 @@ def theme_bonus(c, ctx):
 def prepare(c, ctx):
     """Compute and attach every score the builder needs for this card."""
     syn, syn_why = A.synergy(c, ctx["profile"], ctx["typal"])
+    ref = ctx.get("ref")
+    r, rwhy = ref.score(c) if ref else (0.0, "")
+    c["_ref"] = rwhy
+    if r > 0:
+        syn = min(syn + REF_W * r, A.SYN_CAP)
+        c["_needs"] = sorted(set(c.get("_needs") or []) | {"reference"})
+        if r >= 0.5 or not syn_why:
+            syn_why = f"{syn_why}; {rwhy}" if syn_why else rwhy
     a = E.assess(c)
     # a deck-role card (ramp, draw, removal, protection...) that ALSO serves the commander saves a slot:
     # Ragavan (ramp + a body that counts), Mother of Runes (protection + a body), Young Pyromancer (bodies + more bodies)
@@ -227,15 +237,22 @@ def build(idx, cmd, plan):
     ctx = dict(tribe=tribe, vibe=vibe, vibe_label=plan["vibe_label"], mech=mech, narr=narr, profile=profile, typal=typal)
     warnings = list(plan.get("warnings", []))
     # typed card names: use the closest real card if the spelling is off
-    for key, what in (("must", "Must include"), ("exclude", "Exclude")):
+    plan.setdefault("reference", [])
+    for key, what in (("must", "Must include"), ("exclude", "Exclude"), ("reference", "Reference")):
         fixed = []
         for n in plan[key]:
+            if key == "reference" and not n.strip():
+                continue
             c, fix = CM.resolve_card(idx, n, f"{what} card")
             fixed.append(c["name"])
             if fix and fix not in warnings:
                 warnings.append(fix)
         plan[key] = fixed
     excluded = {n.lower() for n in plan["exclude"]}
+    # real-deck synergy reference: EDHTop16 tournament lists, MTGJSON precons, your Reference box (reference.py)
+    ref = RF.Reference(cmd, plan.get("reference", []), data_dir=os.path.dirname(plan.get("cards_path") or "data/cards.json") or ".",
+                       online=not os.environ.get("DECK_OFFLINE"), log=lambda m: warnings.append(m) if "no tournament" not in m else None)
+    ctx["ref"] = ref
 
     pool = [c for c in CM.unique(idx)
             if set(c["identity"]) <= ident and c["name"] != cmd["name"]
@@ -435,6 +452,13 @@ def build(idx, cmd, plan):
         ok = lambda c, n=need: ST.meets(c, n) and c["_q"] >= 30
         fill(nonland, ok, lambda ok=ok: sum(1 for x in picked if ok(x)), need["quota"], f"Game plan: {need['label']}",
              lambda c, n=need: f"{n['label']}: {E.describe(c)}{needs_text(c)}")
+
+    # 3a. real-deck reference (reference.py): your Reference list first, then cards most tournament decks / the
+    #     official precon run with this commander. Still subject to every rule (colors, Bracket 3, budget, caps).
+    ref_strong = lambda c: ref.score(c)[0] >= 0.6 and c["_q"] >= 25
+    n_ref = sum(1 for c in nonland if ref_strong(c))
+    fill(nonland, ref_strong, lambda: sum(1 for x in picked if ref_strong(x)), min(14, n_ref), "Real-deck reference",
+         lambda c: f"{c['_ref']}: {E.describe(c)}{needs_text(c)}")
 
     # 3b. cards that COUNT for the commander's condition ("creatures with power 2 or less", "with defender"...)
     conds = profile.get("conditions") or []
@@ -881,6 +905,7 @@ def build(idx, cmd, plan):
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
                 wincons=[c["name"] for c in picked if A.is_wincon(c)], deck_swaps=deck_swaps, simulation=sim_info,
+                reference=dict(ref.summary(), in_deck=sorted(c["name"] for c in picked if c.get("_ref"))),
                 deck_links=round(sum(web_final.links(c, True)[0] for c in picked) / max(1, len(picked)), 2),
                 unlinked=[c["name"] for c in picked if web_final.links(c, True)[0] == 0 and c["_syn"] < SYN_ON_PLAN],
                 strategy_counts={n["id"]: sum(1 for x in picked if ST.meets(x, n)) for n in (profile.get("strategy") or {}).get("needs", [])}, speed=dict(turn=speed[0], how=speed[1]),
@@ -940,6 +965,7 @@ def base_plan(a, vibe_label, mech, narr):
     return dict(vibe_label=vibe_label, vibe=vibe, mech=mech, narr=narr, budget=budget,
                 lands=a.lands or vibe["lands"], max_gc=min(vibe["max_gc"], 3) if a.max_gc is None else a.max_gc,
                 must=split_names(a.must), exclude=split_names(a.exclude), avoid=user_avoid,
+                reference=split_names(getattr(a, "reference", "")),
                 tribe_count=a.tribe_count, max_creatures=a.max_creatures, max_nonbasic=a.max_nonbasic,
                 warnings=warnings, tribe="", tribe_mode="off", colors_filter=None)
 
@@ -1080,7 +1106,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked", "simulation")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked", "simulation", "reference")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 
@@ -1099,6 +1125,7 @@ def main():
     ap.add_argument("--budget", default="", help="USD cap; blank = the vibe's default")
     ap.add_argument("--must", default="", help="cards to force in, separated by ;")
     ap.add_argument("--exclude", default="", help="cards to leave out, separated by ;")
+    ap.add_argument("--reference", default="", help="cards real decks run with this commander (your own research), separated by ;")
     ap.add_argument("--avoid", default="", help="e.g. 'wipes, counterspells, tutors, extra turns, stax, infect'")
     ap.add_argument("--suggest-only", action="store_true", dest="suggest_only")
     ap.add_argument("--max-gc", type=int, default=None, dest="max_gc", help="override the Game Changer cap (Bracket 3 = 3)")

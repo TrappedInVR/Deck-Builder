@@ -695,7 +695,7 @@ def plan_hits(card, plan):
 
 
 SYN_CAP = 80.0     # high enough that a card covering several needs still ranks above one covering a single need
-NEED_NAMES = dict(counts="counts for it", enabler="triggers its abilities", fuel="pays its costs", payoff="uses what it makes",
+NEED_NAMES = dict(reference="real decks run it with this commander", counts="counts for it", enabler="triggers its abilities", fuel="pays its costs", payoff="uses what it makes",
                   plan="fits its game plan", typal="a type it names")
 
 
