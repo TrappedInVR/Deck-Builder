@@ -1,0 +1,6 @@
+{
+  "_help": "Your corrections to how the deck builder understands cards. They always win over the builder's own reading and over Scryfall Tagger. Copy an example below, rename the key to a real card name, and keep only the fields you need. Fields: roles_add / roles_remove (ramp, draw, removal, sweeper, counter, tutor, recursion, protection), produces / wants (bodies: body, creature_enters, token_enters, creature_dies, gain_life, draw, to_graveyard, counters_put, land_enters, attacks, untap, artifact_fodder...), concepts_add (board_protect, damage_amp, extra_combat, haste, anthem, etb_payoff, sac_outlet, one_sided_wipe...), staple (true/false), never (true), note. Run the 'Explain cards' workflow to check the result.",
+  "_example: a card you want treated as a staple": {"staple": true, "note": "always worth a slot"},
+  "_example: a card the builder misreads": {"roles_add": ["removal"], "roles_remove": ["draw"], "note": "it's removal, not draw"},
+  "_example: a card you never want picked automatically": {"never": true, "note": "my playgroup hates it"}
+}
