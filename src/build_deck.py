@@ -23,6 +23,8 @@ import combos as K
 import commanders as CM
 import conditions as CN
 import speed as SP
+import strategy as ST
+import cardfn as CF
 import evaluate as E
 import lands as L
 import options as O
@@ -37,6 +39,11 @@ ROLE_NAMES = dict(ramp="Ramp", draw="Card draw", removal="Removal", counter="Cou
 
 # weights for the overall card score
 W_SYN, W_Q, W_POP = 1.5, 0.55, 0.35
+STAPLE_Q = 75           # staple = widely played (EDHREC top STAPLE_RANK) AND efficient at its job for its mana value ...
+STAPLE_RANK = 300
+STAPLE_Q_ALONE = 90     # ... or so efficient it's a staple whatever its popularity
+LINK_W = 12             # value of one full link to the rest of the deck (cardfn.DeckWeb), in card-score points
+LINK_CAP = 2.5          # links beyond this don't add more (a card can't be MORE than fully woven in)
 SYN_ON_PLAN = 8          # synergy at/above this = "on plan" for counting
 MAX_BUDGET = 500.0       # house rule: nonland cards only; lands are never counted
 COMBO_DB = None          # set by main() from data/combos.json (Commander Spellbook); None = no combo checks
@@ -156,9 +163,18 @@ def prepare(c, ctx):
     """Compute and attach every score the builder needs for this card."""
     syn, syn_why = A.synergy(c, ctx["profile"], ctx["typal"])
     a = E.assess(c)
+    # a deck-role card (ramp, draw, removal, protection...) that ALSO serves the commander saves a slot:
+    # Ragavan (ramp + a body that counts), Mother of Runes (protection + a body), Young Pyromancer (bodies + more bodies)
+    useful_roles = set(a["roles"]) & {"ramp", "draw", "removal", "counter", "recursion", "protection", "sweeper"}
+    if useful_roles and c.get("_needs") and syn > 0:
+        syn = min(syn * 1.3, A.SYN_CAP)
+        c["_needs"] = c["_needs"] + ["role:" + "/".join(sorted(useful_roles))]
     th, th_why = theme_bonus(c, ctx)
     pop = CM.popularity(c) * ctx["vibe"]["pop"]
-    s = W_SYN * syn + W_Q * a["q"] + W_POP * pop + th
+    # diminishing returns past 40 synergy: a card that is merely "very on-plan" but weak at what it does
+    # shouldn't bury a strong card that is clearly on-plan
+    syn_eff = syn if syn <= 40 else 40 + 0.5 * (syn - 40)
+    s = W_SYN * syn_eff + W_Q * a["q"] + W_POP * pop + th
     if syn <= 0 and th <= 0 and not a["roles"]:
         s -= 10                                     # generic filler: only if nothing better exists
     if c["cmc"] >= 7 and syn < SYN_ON_PLAN:
@@ -166,11 +182,22 @@ def prepare(c, ctx):
     c["_syn"], c["_syn_why"], c["_q"], c["_th"], c["_th_why"], c["_pop"], c["_s"] = syn, syn_why, a["q"], th, th_why, pop, s
 
 
+def is_staple(c):
+    """Commander staples: cards good enough for their mana value to earn a slot even without synergy
+    (Sol Ring, Swords to Plowshares, Arcane Signet, Lightning Greaves...). The one exception to synergy-first."""
+    if c.get("_staple") is not None:
+        return c["_staple"]                          # your data/overrides.json says so
+    if not E.assess(c)["roles"]:
+        return False
+    return (c["_q"] >= STAPLE_Q and (c.get("rank") or 10 ** 6) <= STAPLE_RANK) or c["_q"] >= STAPLE_Q_ALONE
+
+
 def role_score(c, role):
     """Compare cards for a role: how good they are AT the role first, then how well they fit this deck."""
     # quality decides; synergy and themes break ties between similar cards (capped so a weak on-plan card
     # can't beat a much better one at the actual job)
-    return E.role_quality(c, role) + 0.4 * min(c["_syn"], 40) + 0.4 * c["_pop"] + 0.2 * min(c["_th"], 30)
+    staple = 10 if is_staple(c) else 0              # Sol Ring, Swords to Plowshares...: the exception to synergy-first
+    return E.role_quality(c, role) + 0.4 * min(c["_syn"], 40) + 0.4 * c["_pop"] + 0.2 * min(c["_th"], 30) + staple
 
 
 # ----------------------------------------------------------------------------- the deck builder
@@ -292,6 +319,10 @@ def build(idx, cmd, plan):
                 return "creature count reached"
         if force:
             return ""
+        if c.get("_never"):
+            return "marked 'never' in data/overrides.json"
+        if c.get("_avoid"):
+            return f"works against the game plan ({c['_avoid']})"
         if price(c) > per_card_cap:
             return f"too pricey (${price(c):.0f})"
         if st["spent"] + price(c) > budget:
@@ -358,7 +389,24 @@ def build(idx, cmd, plan):
         cands = sorted((c for c in nonland if role in E.role_tags(c)), key=lambda c: -role_score(c, role))
         role_rank[role] = cands
         fill(cands, lambda c: True, lambda r=role: tagc[r], need, ROLE_NAMES[role],
-             lambda c, r=role: E.describe(c) + (f"; fits {c['_syn_why']}" if c["_syn"] >= SYN_ON_PLAN else ""))
+             lambda c, r=role: E.describe(c) + (f"; fits {c['_syn_why']}{needs_text(c)}" if c["_syn"] >= SYN_ON_PLAN else ""))
+
+    # 3c. the strategic game plan (strategy.py): what multiplies the commander, what protects the plan
+    strat = profile.get("strategy") or {}
+    for need in strat.get("needs", []):
+        ok = lambda c, n=need: ST.meets(c, n) and c["_q"] >= 30
+        fill(nonland, ok, lambda ok=ok: sum(1 for x in picked if ok(x)), need["quota"], f"Game plan: {need['label']}",
+             lambda c, n=need: f"{n['label']}: {E.describe(c)}{needs_text(c)}")
+
+    # 3b. cards that COUNT for the commander's condition ("creatures with power 2 or less", "with defender"...)
+    conds = profile.get("conditions") or []
+    for r in conds:
+        if not r["strong"] and not CN.counts_creatures([r]):
+            continue
+        target = 22 if r["type"] in ("creature", "token") else 14
+        ok = lambda c, r=r: CN.judge(c, r)[0] in ("meets", "makes") and c["_q"] >= 30
+        fill(nonland, ok, lambda ok=ok: sum(1 for x in picked if ok(x)), target, "Counts for the commander",
+             lambda c: f"{c['_syn_why']}: {E.describe(c)}{needs_text(c)}")
 
     # 4. the commander's game plan: the core of the deck, split across its main plans by weight
     if profile["plans"]:
@@ -367,7 +415,7 @@ def build(idx, cmd, plan):
         for p in profile["plans"][:3]:
             target = max(4, round(total * p["weight"] / tw))
             have = lambda name=p["name"]: planc[name]
-            fill(nonland, lambda c, pl=p: A.plan_hits(c, pl) and c["_syn"] >= SYN_ON_PLAN,
+            fill(nonland, lambda c, pl=p: A.plan_hits(c, pl) and c["_syn"] >= SYN_ON_PLAN and c["_q"] >= 32,
                  have, target, "Commander plan", lambda c, name=p["name"]: f"{name}: {E.describe(c)}")
         if typal:
             fill(nonland, lambda c: c["_syn_why"].endswith("(named by your commander)"),
@@ -376,6 +424,7 @@ def build(idx, cmd, plan):
     else:
         warnings.append("This commander has no specific engine in its text, so the deck follows your themes and the vibe.")
 
+    finisher_cmd = (profile.get("role") or {}).get("role") == "finisher"
     # 4-. ability support: every important ability of the commander gets cards that enable / fuel / pay it off
     for p in profile.get("interactions", []):
         if p["weight"] < 1.5:
@@ -383,19 +432,12 @@ def build(idx, cmd, plan):
         target = 6 if p["kind"] in ("enabler", "fuel") else 4
         if p.get("finisher"):
             target += 2                     # the commander IS the win condition: enable it harder
-        fill(nonland, lambda c, pl=p: A.interaction_hits(c, pl) > 0 and c["_q"] >= 35,
+        # when the commander is the finisher, cards that only USE what it produces (and do nothing else for it)
+        # are luxuries: they don't make the win happen, so they don't get slots here
+        payoff_only = lambda c: p["kind"] == "payoff" and finisher_cmd and set(c.get("_needs") or []) <= {"payoff", "plan"}
+        fill(nonland, lambda c, pl=p: A.interaction_hits(c, pl) > 0 and c["_q"] >= 35 and not payoff_only(c),
              lambda pl=p: planc[pl["name"]], target, "Enable the finisher" if p.get("finisher") else "Ability support",
              lambda c, pl=p: f"{pl['name']} ({pl['why'][0][:60]}): {E.describe(c)}")
-
-    # 4-a. cards that COUNT for the commander's condition ("creatures with power 2 or less", "with defender"...)
-    conds = profile.get("conditions") or []
-    for r in conds:
-        if not r["strong"] and not CN.counts_creatures([r]):
-            continue
-        target = 22 if r["type"] in ("creature", "token") else 14
-        ok = lambda c, r=r: CN.judge(c, r)[0] in ("meets", "makes") and c["_q"] >= 30
-        fill(nonland, ok, lambda ok=ok: sum(1 for x in picked if ok(x)), target, "Counts for the commander",
-             lambda c, r=r: f"{CN.judge(c, r)[1]}: {E.describe(c)}")
 
     # 4-b. numeric requirement of the winning ability ('Tap ten untapped Elves'): run enough of them
     role = profile.get("role") or {}
@@ -523,6 +565,68 @@ def build(idx, cmd, plan):
             break
         try_add(c, "Best remaining fit", lambda_reason(c))
 
+    # 8b. DECK SYNERGY PASS: judge every card against the finished deck, not just the commander. Cards that link to
+    #     nothing (the deck neither feeds them nor uses what they make) are swapped for candidates that link better,
+    #     unless they are protected: must-includes, power cards, staples (quality >= STAPLE_Q), and cards a role or
+    #     game-plan quota still needs.
+    web = CF.DeckWeb(picked + [cmd])
+    deck_swaps = []
+
+    def dvalue(c, inside):
+        return c["_s"] + LINK_W * min(web.links(c, inside)[0], LINK_CAP)
+
+    strat_needs = (profile.get("strategy") or {}).get("needs", [])
+    must_l = {n.lower() for n in plan["must"]}
+
+    def protected(c):
+        if c["name"].lower() in must_l or is_power(c) or is_staple(c):
+            return True
+        for r in E.role_tags(c):
+            if quotas.get(r, 0) > 0 and tagc[r] - 1 < quotas[r]:
+                return True
+        for n in strat_needs:
+            if ST.meets(c, n) and sum(1 for x in picked if ST.meets(x, n)) - 1 < n["quota"]:
+                return True
+        return False
+
+    pool_in = [c for c in nonland[:250] if c["_q"] >= 30 and not is_power(c) and not c.get("_avoid")]
+    for _ in range(15):
+        outs = sorted((c for c in picked if not protected(c)), key=lambda c: dvalue(c, True))[:6]
+        ins = sorted((c for c in pool_in if c["name"] not in names and not (face_keys(c) & taken)),
+                     key=lambda c: -dvalue(c, False))[:60]
+        done = False
+        def jobs(c):
+            """The deck jobs a card does: its roles that have a quota, and the game-plan needs it covers."""
+            return ({r for r in E.role_tags(c) if quotas.get(r, 0) > 0} |
+                    {n["id"] for n in strat_needs if ST.meets(c, n)})
+
+        for o in outs:
+            vo = dvalue(o, True)
+            need = jobs(o)                     # like-for-like: the replacement must do every job the old card did
+            for c in ins:
+                if dvalue(c, False) <= vo + 8:
+                    break
+                if not need <= jobs(c):
+                    continue
+                old = why[o["name"]]
+                remove(o)
+                web.remove(o)
+                if blocked(c, creature_cap=cap):
+                    add(o, *old)
+                    web.add(o)
+                    continue
+                web.add(c)
+                _, lr = web.links(c, True)
+                add(c, "Deck synergy", f"links with the deck ({'; '.join(lr) or 'commander'}): {E.describe(c)}{needs_text(c)} "
+                                       f"(replaces {o['name']})")
+                deck_swaps.append(dict(out=o["name"], into=c["name"]))
+                done = True
+                break
+            if done:
+                break
+        if not done:
+            break
+
     # 9. combo check: swap out a piece of any combo this vibe / Bracket 3 doesn't allow (early two-card wins etc.)
     must_names = {n.lower() for n in plan["must"]}
     if db:
@@ -604,12 +708,15 @@ def build(idx, cmd, plan):
     else:
         basics["Wastes"] = basics_n
 
+    web_final = CF.DeckWeb(picked + [cmd])
     # ---- report: why each card is in, and the best cards that were edged out per role
     report = []
     for c in sorted(picked, key=lambda c: (c["cmc"], c["name"])):
         step, reason = why[c["name"]]
+        lk, lr = web_final.links(c, True)
         report.append(dict(name=c["name"], step=step, why=reason, quality=c["_q"], synergy=round(c["_syn"], 1),
-                           roles=sorted(E.assess(c)["roles"]), cmc=c["cmc"]))
+                           links=round(lk, 2), link_why=lr, staple=is_staple(c),
+                           roles=sorted(E.assess(c)["roles"]), cmc=c["cmc"], needs=c.get("_needs") or []))
     edged = {}
     for role, cands in role_rank.items():
         alts = []
@@ -662,14 +769,26 @@ def build(idx, cmd, plan):
                 nonbasic=len(nonbasic), land_pool=land_info["candidates"], warnings=warnings, land_cost=land_cost,
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
-                wincons=[c["name"] for c in picked if A.is_wincon(c)], speed=dict(turn=speed[0], how=speed[1]),
+                wincons=[c["name"] for c in picked if A.is_wincon(c)], deck_swaps=deck_swaps,
+                deck_links=round(sum(web_final.links(c, True)[0] for c in picked) / max(1, len(picked)), 2),
+                unlinked=[c["name"] for c in picked if web_final.links(c, True)[0] == 0 and c["_syn"] < SYN_ON_PLAN],
+                strategy_counts={n["id"]: sum(1 for x in picked if ST.meets(x, n)) for n in (profile.get("strategy") or {}).get("needs", [])}, speed=dict(turn=speed[0], how=speed[1]),
                 profile=profile, vibe_match=vmatch, natural_vibe=natural, report=report, edged=edged, combos=combo_info,
                 validation=problems)
 
 
+def needs_text(c):
+    """'covers 3 needs: counts for it + triggers its abilities + ramp'"""
+    n = c.get("_needs") or []
+    if len(n) < 2:
+        return ""
+    words = [A.NEED_NAMES.get(x) or ST.LABELS.get(x) or x.split(":", 1)[-1] for x in n]
+    return f" [covers {len(n)} needs: {' + '.join(words)}]"
+
+
 def lambda_reason(c):
     if c["_syn"] >= SYN_ON_PLAN:
-        return f"fits {c['_syn_why']}: {E.describe(c)}"
+        return f"fits {c['_syn_why']}: {E.describe(c)}{needs_text(c)}"
     if c["_th_why"]:
         return f"{c['_th_why']}: {E.describe(c)}"
     return E.describe(c)
@@ -850,7 +969,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 

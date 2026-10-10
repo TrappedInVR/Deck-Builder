@@ -143,21 +143,68 @@ def judge(c, r):
     return "", ""
 
 
+_QTY = dict(a=1, an=1, one=1, two=2, three=3, four=4, five=5, six=6, seven=7, x=3)
+_TOKEN_N = re.compile(r"\bcreates? (?:(a|an|one|two|three|four|five|six|seven|x|that many|a number of) )?(?:tapped )?(?:[\w-]+ )?"
+                      r"(\d+|x)/(\d+|x)([^.]{0,80}?)creature tokens?", re.I)
+
+
+def _line_of(text, pos):
+    a = text.rfind("\n", 0, pos) + 1
+    b = text.find("\n", pos)
+    return text[a:b if b != -1 else len(text)]
+
+
+def bodies(c, r):
+    """How many bodies that COUNT for the commander this card adds over a game: itself (if it qualifies) plus the
+    tokens it makes. A repeatable maker ('whenever...', 'at the beginning of...', an activated ability) counts x3.
+    Returns (bodies, parts) where parts explains it ('itself', '2 tokens', 'tokens every turn')."""
+    if r["type"] not in ("creature", "token"):
+        return 0.0, []
+    text = c.get("text") or ""
+    tl = c.get("type_line") or ""
+    n, parts = 0.0, []
+    if "Creature" in tl and judge(c, dict(r, _self=True))[0] == "meets":
+        n += 1
+        parts.append("itself")
+    for m in _TOKEN_N.finditer(text):
+        if r["kind"] == "keyword":
+            ok = r["keyword"] in m.group(4).lower()
+        else:
+            p = m.group(2) if r["stat"] == "power" else m.group(3)
+            ok = p.lower() != "x" and _ok(int(p), r)
+        if not ok:
+            continue
+        q = (m.group(1) or "a").lower()
+        qty = _QTY.get(q, 2)
+        line = _line_of(text, m.start())
+        rep = bool(re.search(r"\b(?:whenever|at the beginning of)\b", line, re.I)) or bool(re.match(r"^[^:]{0,60}:", line))
+        n += qty * (3 if rep else 1)
+        parts.append(f"{'tokens every turn' if rep else str(qty) + ' token' + ('s' if qty > 1 else '')} ({m.group(2)}/{m.group(3)})")
+        break
+    return n, parts
+
+
 def score(c, rule_list):
-    """Synergy adjustment and reason for a card against all of the commander's conditions."""
+    """Synergy adjustment and reason for a card against all of the commander's conditions.
+    For a condition the commander COUNTS ('X is the number of creatures you control with power 2 or less'), the
+    value is how many qualifying bodies the card adds, and how cheaply: Young Pyromancer (a 2-power body that keeps
+    making 1/1s) beats a lone 1/1, which beats a 5-power creature (which costs points: it takes a slot and doesn't count)."""
     s, why = 0.0, ""
     for r in rule_list:
-        k, reason = judge(c, r)
         w = 1.5 if r["strong"] else 1.0
-        d = {"meets": 9, "makes": 11, "helps": 6, "breaks": -14, "misses": -6}.get(k, 0) * w
-        if k == "makes" and "repeatedly" in reason:
-            d += 5 * w
-        if k == "misses" and r["type"] not in ("creature", "token"):
-            d = 0
+        b, parts = bodies(c, r)
+        if b > 0:
+            cmc = max(c.get("cmc") or 0, 1)
+            d = (5 + 5 * min(b, 4) + 3 * min(b / cmc, 2)) * w
+            reason = ("a body that counts for your commander" if parts == ["itself"] else
+                      f"{' + '.join(parts).replace('itself', 'a body')} that count for your commander")
+        else:
+            k, reason = judge(c, r)
+            d = {"meets": 9, "makes": 11, "helps": 6, "breaks": -14, "misses": -10 if r["strong"] else -6}.get(k, 0) * w
+            if k == "misses" and r["type"] not in ("creature", "token"):
+                d = 0
         s += d
-        if d > 0 and not why:
-            why = reason
-        elif d < 0 and not why:
+        if d and not why:
             why = reason
     return s, why
 

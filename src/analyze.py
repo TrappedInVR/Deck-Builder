@@ -580,7 +580,9 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
         fin = [ln.lower() for ln in role["lines"]]
         for p in inter:
             # interactions that come from the winning ability: enable it harder (bigger weight, more cards)
-            if any(w.rstrip(".").lower()[:40] in ln for w in p["why"] for ln in fin) or not fin:
+            # only cards that MAKE the winning ability happen (trigger it, pay its costs) get the finisher boost;
+            # cards that merely use what it produces (lifegain payoffs) are nice, not essential
+            if p["kind"] in ("enabler", "fuel", "keyword") and (any(w.rstrip(".").lower()[:40] in ln for w in p["why"] for ln in fin) or not fin):
                 p["weight"] = round(min(p["weight"] * 1.6, 10), 2)
                 p["finisher"] = True
         if is_creature:
@@ -595,7 +597,11 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
                      ". Cards that count (or make tokens that do) are favored; cards that push yours out of the count are avoided.")
         if CN.counts_creatures(conds):
             creatures = max(creatures or 0, 30)
+    # the strategic game plan: what multiplies it, what it needs, what beats it (strategy.py)
+    import strategy as ST
+    strat = ST.plan(cmd, role, conds, parsed, routes)
     return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8], role=role, conditions=conds,
+                strategy=strat,
                 abilities=[dict(kind=a["kind"], text=a["text"], event=a["event"][1] if a["event"] else None,
                                 costs=[c[1] for c in a["costs"]], outputs=[o[1] for o in a["outputs"]], style=a["style"])
                            for a in parsed],
@@ -688,16 +694,30 @@ def plan_hits(card, plan):
     return card_hits(card)[0].get(plan["name"], 0)
 
 
+SYN_CAP = 80.0     # high enough that a card covering several needs still ranks above one covering a single need
+NEED_NAMES = dict(counts="counts for it", enabler="triggers its abilities", fuel="pays its costs", payoff="uses what it makes",
+                  plan="fits its game plan", typal="a type it names")
+
+
 def synergy(card, profile, tribe_words=()):
     """How much this card helps THIS commander: its strategies AND its specific abilities.
-    Returns (score 0..~60, reason or '')."""
+    Returns (score 0..~60, reason or '').
+
+    Needs model: every way a card can help the commander is a different NEED (it counts for the commander's
+    condition, triggers its abilities, pays its costs, uses what it makes, fits its game plan, is a type it names).
+    A card that covers SEVERAL needs at once is worth more than the sum of single-purpose cards (it saves slots),
+    so the total is multiplied by 1 + 0.25 per extra need (max x1.75). The needs covered are stored on the card
+    (card['_needs']) for the report and for compounding with deck roles (build_deck.prepare)."""
     hits, hate = card_hits(card)
     s, best, best_v = 0.0, "", 0.0
+    needs = set()
     for p in profile["plans"]:
         h = hits.get(p["name"])
         if h:
             v = h * p["weight"] * 2.0
             s += v
+            if h >= 1:
+                needs.add("plan")
             if v > best_v:
                 best, best_v = p["name"], v
         if p["name"] in hate:
@@ -707,6 +727,8 @@ def synergy(card, profile, tribe_words=()):
         if h:
             v = h * p["weight"] * 1.6
             s += v
+            if h >= 1:
+                needs.add({"keyword": "enabler"}.get(p["kind"], p["kind"]))
             if v > best_v:
                 best, best_v = p["name"], v
     # creature types the commander cares about (beyond the main tribe system)
@@ -715,6 +737,7 @@ def synergy(card, profile, tribe_words=()):
     for t in tribe_words:
         if re.search(r"\b%s\b" % re.escape(t), sub) or ("Creature" in tl and "changeling" in (card.get("text") or "").lower()):
             s += 12
+            needs.add("typal")
             if best_v < 12:
                 best, best_v = f"{t} (named by your commander)", 12
             break
@@ -722,11 +745,27 @@ def synergy(card, profile, tribe_words=()):
         import conditions as CN
         d, why = CN.score(card, profile["conditions"])
         s += d
-        if d > 0 and d >= best_v:
-            best, best_v = f"counts for your commander: {why}", d
+        if d > 0:
+            needs.add("counts")
+            if d >= best_v:
+                best, best_v = f"{why}", d
         elif d < 0 and s <= 0:
             best = f"doesn't fit your commander: {why}"
-    return min(s, 60.0), best
+    card["_avoid"] = ""
+    if profile.get("strategy"):
+        import strategy as ST
+        d, met, bad = ST.judge(card, profile["strategy"])
+        s += d
+        needs.update(met)
+        if met and d >= best_v:
+            best, best_v = ST.LABELS.get(met[0], met[0]), d
+        if bad:
+            card["_avoid"] = bad
+            best = f"works against the game plan: {bad}"
+    if s > 0 and len(needs) >= 2:
+        s *= min(1 + 0.25 * (len(needs) - 1), 1.75)
+    card["_needs"] = sorted(needs)
+    return min(s, SYN_CAP), best
 
 
 # ------------------------------------------------------------------------------------------------

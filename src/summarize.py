@@ -89,6 +89,22 @@ def main():
     for n in prof.get("notes", []):
         A(f"- {n}")
     A("")
+    strat = prof.get("strategy") or {}
+    if strat.get("story"):
+        A("**Game plan**" + (f" ({', '.join(strat['facets'])})" if strat.get("facets") else "") + ":")
+        A("")
+        for line in strat["story"]:
+            A(f"- {line}")
+        sc = p.get("strategy_counts") or {}
+        for n in strat.get("needs", []):
+            A(f"- {n['label'].capitalize()}: {sc.get(n['id'], 0)} cards (target {n['quota']}). _{n['why']}._")
+        A("")
+    try:
+        import pilot
+        for line in pilot.guide(p):
+            A(line)
+    except Exception as e:                     # the guide is a bonus: never break the summary
+        A(f"_(pilot guide unavailable: {e})_")
     role = prof.get("role") or {}
     if role:
         label = {"finisher": "Finisher", "engine": "Engine", "value": "Value piece"}[role["role"]]
@@ -151,6 +167,14 @@ def main():
     A("")
     A(f"- **{p.get('onplan', 0)}** cards directly support the commander's plan | average card quality **{p.get('avg_quality', 0)}**/100 "
       f"(compared against the best card for the same job)")
+    if p.get("deck_links") is not None:
+        rep = p.get("report") or []
+        staples = [r["name"] for r in rep if r.get("staple")]
+        A(f"- Deck synergy: each card links to the rest of the deck **{p['deck_links']}** ways on average (it uses what other "
+          f"cards make, or makes what they use). {len(p.get('deck_swaps') or [])} cards were swapped in by the deck synergy pass."
+          + (f" Stand-alone cards (no links, no commander synergy): {', '.join(p['unlinked'])}." if p.get("unlinked") else ""))
+        if staples:
+            A(f"- Staples kept for raw efficiency (the exception to synergy-first): {', '.join(staples)}")
     A(f"- Creatures {p['creatures']} (cap {p.get('creature_cap')}) | tutors {p['tutors']} | extra-turn cards {p['extra_turns']}")
     if p["mechanical_theme"] != "Any (no preference)":
         A(f"- Cards matching **{p['mechanical_theme']}**: {p['mech_hits']}")

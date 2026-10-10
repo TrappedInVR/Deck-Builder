@@ -1,5 +1,6 @@
 """Shared helpers: card loading and deck-file parsing."""
-import json, re
+import json
+import os, re
 from tags import tag
 
 # Cards that are never part of the 100-card main deck. Each has its own deck/zone or lives outside the game:
@@ -36,6 +37,8 @@ def face_keys(c_or_name):
 
 def load_cards(path="data/cards.json"):
     """Return {lowercase name: card}. Double-faced cards are also indexed by front face."""
+    import knowledge as K
+    data_dir = os.path.dirname(path) or "."
     with open(path, encoding="utf-8") as f:
         cards = json.load(f)
     idx = {}
@@ -51,6 +54,7 @@ def load_cards(path="data/cards.json"):
             c["text"] = re.sub(r" ?\([^()]*\)", "", c.get("text") or "").strip()
             c["_reminder_stripped"] = True
         c["tags"] = tag(c)                    # re-tag on load: rule fixes apply even to yesterday's cached download
+        K.apply(c, data_dir)                  # + Scryfall Tagger function tags and your data/overrides.json
         idx[c["name"].lower()] = c
         if " // " in c["name"]:
             for f in face_keys(c):            # either face's name finds the same (single) card
