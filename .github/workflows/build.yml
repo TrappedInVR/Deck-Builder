@@ -140,17 +140,21 @@ on:
         description: "9. Cards to leave out (optional), separated by ;"
         required: false
         default: ""
+      reference:
+        description: "10. Reference cards (optional), separated by ;: cards you've seen real decks run with this commander (e.g. from browsing EDHREC yourself). Strongly favored, but still checked against every rule."
+        required: false
+        default: ""
       budget:
-        description: "10. Budget in $ for the nonland cards (optional, max 500). Lands never count."
+        description: "11. Budget in $ for the nonland cards (optional, max 500). Lands never count."
         required: false
         default: ""
       randomize:
-        description: "11. Surprise me! Random vibe, colors and themes. Anything you typed above still counts."
+        description: "12. Surprise me! Random vibe, colors and themes. Anything you typed above still counts."
         required: false
         type: boolean
         default: false
       seed:
-        description: "12. Seed (optional): copy the number from a past run's summary to rebuild the same random deck."
+        description: "13. Seed (optional): copy the number from a past run's summary to rebuild the same random deck."
         required: false
         default: ""
 jobs:
@@ -167,6 +171,7 @@ jobs:
       BUDGET: ${{ inputs.budget }}
       MUST: ${{ inputs.must_include }}
       EXCLUDE: ${{ inputs.exclude }}
+      REFERENCE: ${{ inputs.reference }}
       AVOID: ${{ inputs.avoid }}
       SEED: ${{ inputs.seed }}
     steps:
@@ -195,11 +200,19 @@ jobs:
           key: tags-v1-${{ steps.week.outputs.w }}
       - name: Fetch Scryfall Tagger function tags (skipped if cached this week; never fails the run)
         run: test -s data/tags.json || python src/fetch_tags.py || true
+      - uses: actions/cache@v4            # MTGJSON precon lists (weekly) + EDHTop16 per-commander tournament data (7 days)
+        with:
+          path: |
+            data/reference.json
+            data/edhtop16
+          key: reference-v1-${{ steps.week.outputs.w }}
+      - name: Fetch precon decklists from MTGJSON (skipped if cached this week; never fails the run)
+        run: test -s data/reference.json || python src/fetch_reference.py || true
       - name: Plan and build the deck
         run: >
           python src/build_deck.py --randomize "$RANDOMIZE" --vibe "$VIBE" --colors "$COLORS" --mech "$MECH"
           --narr "$NARR" --tribe "$TRIBE" --commander "$COMMANDER" --budget "$BUDGET"
-          --must "$MUST" --exclude "$EXCLUDE" --avoid "$AVOID" --seed "$SEED"
+          --must "$MUST" --exclude "$EXCLUDE" --reference "$REFERENCE" --avoid "$AVOID" --seed "$SEED"
       - name: Goldfish simulation
         # Uses the tribe the builder settled on (typed, auto-detected, or none), saved in out/tribe.txt.
         run: python src/goldfish.py out/deck.txt --tribe "$(cat out/tribe.txt)"

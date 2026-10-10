@@ -45,5 +45,13 @@ jobs:
           key: tags-v1-${{ steps.week.outputs.w }}
       - name: Fetch Scryfall Tagger function tags (skipped if cached this week; never fails the run)
         run: test -s data/tags.json || python src/fetch_tags.py || true
+      - uses: actions/cache@v4            # MTGJSON precon lists (weekly) + EDHTop16 per-commander tournament data (7 days)
+        with:
+          path: |
+            data/reference.json
+            data/edhtop16
+          key: reference-v1-${{ steps.week.outputs.w }}
+      - name: Fetch precon decklists from MTGJSON (skipped if cached this week; never fails the run)
+        run: test -s data/reference.json || python src/fetch_reference.py || true
       - name: Explain
         run: python src/explain_card.py --cards "$CARDS" --commander "$COMMANDER" >> "$GITHUB_STEP_SUMMARY"
