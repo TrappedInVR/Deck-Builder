@@ -139,6 +139,18 @@ def _clamp(v):
 
 
 # ------------------------------------------------------------------------------------------------ role scorers
+_COMBAT_GATE = re.compile(r"(?:whenever|when)\b[^.]{0,70}(?:becomes blocked|deals combat damage|\battacks?\b|attack with|blocks)|\bbattalion\b|\braid\b", re.I)
+
+
+def combat_gated(x, effect_rx):
+    """True if the sentence that does the job only happens in combat ('whenever ~ deals combat damage to a player,
+    draw a card'): it needs your creature to attack/connect first, so it's far less reliable than a plain effect."""
+    for sent in re.split(r"(?<=[.\n])", x):
+        if re.search(effect_rx, sent, re.I):
+            return bool(_COMBAT_GATE.search(sent))
+    return False
+
+
 def score_ramp(c, x, notes):
     t = c["type_line"]
     cmc = _cmc(c)
@@ -215,8 +227,11 @@ def score_ramp(c, x, notes):
         if re.search(r"enters(?: the battlefield)? tapped", xl):
             q -= 6; notes.append("enters tapped")
     elif re.search(r"create (?:a|an|one|two|three|x|that many) (?:tapped )?treasure", xl):
-        q = 50 - 7 * (cmc - 2) + (14 if REPEAT.search(x) else 0)
-        notes.append("treasure" + (" engine" if REPEAT.search(x) else ""))
+        rep = bool(REPEAT.search(x)) and not INSTANT_OR_SORCERY.search(c["type_line"])
+        q = 50 - 7 * (cmc - 2) + (14 if rep else 0)
+        notes.append("treasure" + (" engine" if rep else ""))
+        if combat_gated(x, r"treasure"):
+            q -= 16; notes.append("only on combat")
     elif re.search(r"\badd\b", xl):                 # rituals and one-shot mana
         q = 34 - 4 * (cmc - 1); notes.append("one-shot mana")
     elif re.search(r"costs? \{\d\} less", xl):
@@ -224,6 +239,9 @@ def score_ramp(c, x, notes):
     else:
         q = 45 - 6 * (cmc - 2)
     return q
+
+
+INSTANT_OR_SORCERY = re.compile(r"\b(?:Instant|Sorcery)\b")
 
 
 def score_draw(c, x, notes):
@@ -278,6 +296,10 @@ def score_draw(c, x, notes):
         q -= 6
     if SYMMETRIC.search(x):
         q -= 10; notes.append("opponents draw too")
+    if combat_gated(x, r"\bdraw"):
+        q -= 16; notes.append("only on combat")
+    elif re.search(r"whenever you attack with (?:two|three|\w+) or more|if you control (?:two|three|\w+) or more \w+", xl):
+        q -= 10; notes.append("needs a specific board")
     return q
 
 
@@ -329,8 +351,13 @@ def score_removal(c, x, notes):
         q -= 2
     else:
         q += 2                                      # permanent / creature that removes, often with upside
+    gated = combat_gated(x, r"(?:destroy|exile|damage to|fights?|gets -)")
     if ab.get("repeatable") and not ab.get("one_shot"):
         q += 12 if not ab.get("act") else 6; notes.append("repeatable")
+    if gated:
+        q -= 18; notes.append("only on combat")
+    if m and not re.search(r"(?:exile|destroy) target", xl) and m.group(1) == "1":
+        q -= 6; notes.append("1 damage kills little")
     if re.search(r"(?:up to )?(?:two|three|x) target|each (?:creature|permanent) (?:an opponent controls|your opponents control)", xl):
         q += 6; notes.append("multiple targets")
     if re.search(r"its controller (?:creates|gains|draws|may search)|you lose|you sacrifice", xl):
@@ -339,6 +366,23 @@ def score_removal(c, x, notes):
         q -= 6; notes.append("aura-based (can be undone)")
     q -= 8 * max(0, cmc - 1.5)
     return q
+
+
+def removal_reach(card):
+    """What a removal card can answer: 3 any nonland permanent, 2 any creature, 1 some creatures (damage, restricted,
+    combat-only), 0 noncreature only. A substitute for a staple must reach at least as far."""
+    x = own_text(card).lower()
+    if combat_gated(x, r"(?:destroy|exile|damage to)"):
+        return 1
+    if re.search(r"(?:destroy|exile) target (?:nonland )?permanent(?! you control)|shuffles? (?:it|that permanent) into|"
+                 r"owner of target permanent", x):
+        return 3
+    if re.search(r"(?:destroy|exile) target (?:artifact, creature,? or enchantment|creature or planeswalker|creature)(?! you control| cards?)", x) \
+            and not _NARROW.search(x) and not _HOSER.search(x):
+        return 2
+    if re.search(r"target creature(?! cards?)|any target|creature an opponent controls", x):
+        return 1
+    return 0
 
 
 def score_counter(c, x, notes):

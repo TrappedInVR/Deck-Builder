@@ -15,6 +15,7 @@ import json
 import os
 import random
 import re
+import zlib
 import sys
 from collections import Counter
 
@@ -25,6 +26,7 @@ import conditions as CN
 import speed as SP
 import strategy as ST
 import cardfn as CF
+import sim as SIM
 import evaluate as E
 import lands as L
 import options as O
@@ -40,9 +42,15 @@ ROLE_NAMES = dict(ramp="Ramp", draw="Card draw", removal="Removal", counter="Cou
 # weights for the overall card score
 W_SYN, W_Q, W_POP = 1.5, 0.55, 0.35
 STAPLE_Q = 75           # staple = widely played (EDHREC top STAPLE_RANK) AND efficient at its job for its mana value ...
-STAPLE_RANK = 300
+STAPLE_RANK = 500
+SUB_MARGIN = 10         # a synergy card may replace a staple only if it is at most this much worse at the job
+STAPLE_ROLES = ("ramp", "draw", "removal", "sweeper")   # staples first in these slots (see staple_first_fill)
 STAPLE_Q_ALONE = 90     # ... or so efficient it's a staple whatever its popularity
 LINK_W = 12             # value of one full link to the rest of the deck (cardfn.DeckWeb), in card-score points
+SIM_GAMES = 400         # games per deck version in the simulator (same shuffles for every version)
+SIM_SWAPS = 8           # at most this many simulator swaps per deck
+SIM_GAIN = 0.08         # a swap must make the deck kill at least this many turns faster on average
+INSURANCE = {"removal", "protection", "board_protect", "counter", "sweeper"}
 LINK_CAP = 2.5          # links beyond this don't add more (a card can't be MORE than fully woven in)
 SYN_ON_PLAN = 8          # synergy at/above this = "on plan" for counting
 MAX_BUDGET = 500.0       # house rule: nonland cards only; lands are never counted
@@ -330,7 +338,8 @@ def build(idx, cmd, plan):
         if c["game_changer"] and st["gc"] >= gc_target:
             return "Game Changer limit (Bracket 3)" if st["gc"] >= max_gc else "Game Changer target for this vibe reached"
         power = is_power(c)
-        if power and st["core"]:
+        if power and st["core"] and not (is_staple(c) and not c["game_changer"] and "tutor" not in c["tags"]
+                                          and "extra_turn" not in c["tags"]):   # Sol Ring & co. are staples, not "power"
             return "power card: waits until the synergy core is built"
         if power and not rules_only:
             t, how = SP.earliest_win(picked + [c], cmd, db)
@@ -382,12 +391,41 @@ def build(idx, cmd, plan):
         quotas["sweeper"] = 0
     if any(p in top_plans[:2] for p in ("Tokens / go wide", "Combat / attack triggers", "Voltron / equipment & auras")) or tribe:
         quotas["sweeper"] = min(quotas["sweeper"], 1)  # creature decks run few (ideally one-sided) wipes
+    def staple_first_fill(role, need, cands):
+        """Ramp, draw, removal and board wipes: staples by default. A staple only loses its slot to a card that does
+        the same job for EQUAL OR LESS mana, nearly as well (role quality within SUB_MARGIN), and fits the commander's
+        plan clearly better."""
+        staples = [c for c in cands if is_staple(c)]
+        staples.sort(key=lambda c: -E.role_quality(c, role))
+        subs = [c for c in cands if not is_staple(c) and c["_syn"] >= SYN_ON_PLAN and E.role_quality(c, role) >= 50]
+        for st_card in staples:
+            if tagc[role] >= need or len(picked) >= st["limit"]:
+                return
+            if blocked(st_card):
+                continue
+            sq = E.role_quality(st_card, role)
+            better = [x for x in subs if x["name"] not in names and (x.get("cmc") or 0) <= (st_card.get("cmc") or 0)
+                      and x["_syn"] >= st_card["_syn"] + SYN_ON_PLAN
+                      and E.role_quality(x, role) >= sq - SUB_MARGIN      # a real substitute: nearly as good at the job
+                      and (role != "removal" or E.removal_reach(x) >= E.removal_reach(st_card))   # answers as much
+                      and not blocked(x, creature_cap=cap)]
+            if better:
+                x = max(better, key=lambda c: (c["_syn"], E.role_quality(c, role)))
+                add(x, ROLE_NAMES[role], f"{E.describe(x)}; instead of the staple {st_card['name']}: same job for "
+                                         f"{'less' if (x.get('cmc') or 0) < (st_card.get('cmc') or 0) else 'the same'} mana, "
+                                         f"and it fits {x['_syn_why']}{needs_text(x)}")
+            else:
+                add(st_card, ROLE_NAMES[role], f"{E.describe(st_card)}; staple"
+                    + (f", also fits {st_card['_syn_why']}" if st_card["_syn"] >= SYN_ON_PLAN else ""))
+
     role_rank = {}
     for role, need in quotas.items():
         if need <= 0:
             continue
         cands = sorted((c for c in nonland if role in E.role_tags(c)), key=lambda c: -role_score(c, role))
         role_rank[role] = cands
+        if role in STAPLE_ROLES:
+            staple_first_fill(role, need, cands)
         fill(cands, lambda c: True, lambda r=role: tagc[r], need, ROLE_NAMES[role],
              lambda c, r=role: E.describe(c) + (f"; fits {c['_syn_why']}{needs_text(c)}" if c["_syn"] >= SYN_ON_PLAN else ""))
 
@@ -589,17 +627,17 @@ def build(idx, cmd, plan):
                 return True
         return False
 
+    def jobs(c):
+        """The deck jobs a card does: its roles that have a quota, and the game-plan needs it covers."""
+        return ({r for r in E.role_tags(c) if quotas.get(r, 0) > 0} |
+                {n["id"] for n in strat_needs if ST.meets(c, n)})
+
     pool_in = [c for c in nonland[:250] if c["_q"] >= 30 and not is_power(c) and not c.get("_avoid")]
     for _ in range(15):
         outs = sorted((c for c in picked if not protected(c)), key=lambda c: dvalue(c, True))[:6]
         ins = sorted((c for c in pool_in if c["name"] not in names and not (face_keys(c) & taken)),
                      key=lambda c: -dvalue(c, False))[:60]
         done = False
-        def jobs(c):
-            """The deck jobs a card does: its roles that have a quota, and the game-plan needs it covers."""
-            return ({r for r in E.role_tags(c) if quotas.get(r, 0) > 0} |
-                    {n["id"] for n in strat_needs if ST.meets(c, n)})
-
         for o in outs:
             vo = dvalue(o, True)
             need = jobs(o)                     # like-for-like: the replacement must do every job the old card did
@@ -626,6 +664,79 @@ def build(idx, cmd, plan):
                 break
         if not done:
             break
+
+    # 8c. SIMULATION (sim.py): play the deck many times with its cards interacting (the commander included), then
+    #     swap the cards that contribute least for approved candidates that do the same jobs, keeping a swap only if
+    #     the deck kills faster over the same shuffled games. Same protections as the deck synergy pass.
+    sim_info = None
+    if plan.get("simulate", True):
+        conds = profile.get("conditions") or []
+        fin = (profile.get("role") or {}).get("role") == "finisher"
+        cmd_m = SIM.sim_model(cmd, conds, True)
+        _mc = {}
+
+        def M(c):
+            if c["name"] not in _mc:
+                _mc[c["name"]] = SIM.sim_model(c, conds)
+            return _mc[c["name"]]
+
+        base_seed = zlib.crc32(cmd["name"].encode()) % 100000       # same shuffles every run: reproducible builds
+        seeds = list(range(base_seed, base_seed + SIM_GAMES))
+        def can_swap(o, c):
+            """Would c be allowed in if o left (budget, creature cap, Game Changers...)?"""
+            old = why[o["name"]]
+            remove(o)
+            ok = not blocked(c, creature_cap=cap)
+            add(o, *old)
+            return ok
+
+        cur = SIM.evaluate([M(c) for c in picked], cmd_m, lands, conds, seeds, fin)
+        start = dict(cur)
+        sim_swaps = []
+        for _ in range(SIM_SWAPS):
+            credit = cur["credit"]
+            # interaction (removal, protection, wipes, counters) is insurance: its value shows up only when the table
+            # acts, so the simulator never cuts it; it tunes the cards that are supposed to DO things
+            outs = sorted((c for c in picked if not protected(c) and not (jobs(c) & INSURANCE)),
+                          key=lambda c: credit.get(c["name"], 0))[:6]
+            ins = sorted((c for c in pool_in if c["name"] not in names and not (face_keys(c) & taken)),
+                         key=lambda c: -dvalue(c, False))[:40]
+            best = None
+            if os.environ.get("SIM_DEBUG"):
+                print("SIM outs:", [(o["name"], round(credit.get(o["name"], 0), 2), sorted(jobs(o))) for o in outs])
+                print("SIM ins:", [(c["name"], sorted(jobs(c))) for c in ins[:15]])
+            for o in outs:
+                need = jobs(o)
+                for c in [x for x in ins if need <= jobs(x) and can_swap(o, x)][:4]:
+                    trial = [M(x) for x in picked if x is not o] + [M(c)]
+                    r = SIM.evaluate(trial, cmd_m, lands, conds, seeds, fin)
+                    if os.environ.get("SIM_DEBUG"):
+                        print(f"   try {o['name']} -> {c['name']}: {r['kill']:.2f} vs {cur['kill']:.2f}")
+                    if SIM.score(r) < SIM.score(cur) - SIM_GAIN and (best is None or SIM.score(r) < SIM.score(best[2])):
+                        best = (o, c, r)
+                if best:
+                    break
+            if not best:
+                break
+            o, c, r = best
+            old = why[o["name"]]
+            remove(o)
+            if blocked(c, creature_cap=cap):
+                add(o, *old)
+                pool_in = [x for x in pool_in if x is not c]
+                continue
+            add(c, "Simulation", f"simulated games: the deck kills {cur['kill'] - r['kill']:.2f} turns faster on average "
+                                 f"with it than with {o['name']}: {E.describe(c)}{needs_text(c)}")
+            web.remove(o); web.add(c)
+            sim_swaps.append(dict(out=o["name"], into=c["name"], gain=round(cur["kill"] - r["kill"], 2)))
+            cur = r
+        spread = SIM.kill_spread([M(c) for c in picked], cmd_m, lands, conds, seeds, fin)
+        cred = cur["credit"]
+        sim_info = dict(games=SIM_GAMES, start_kill=round(start["kill"], 2), kill=round(cur["kill"], 2), spread=spread,
+                        fast=round(cur["fast"], 3), swaps=sim_swaps,
+                        top=[(n, round(v, 1)) for n, v in sorted(cred.items(), key=lambda kv: -kv[1])[:8]],
+                        quiet=[c["name"] for c in picked if cred.get(c["name"], 0) < 0.3 and not is_staple(c)
+                               and not (set(E.role_tags(c)) & {"removal", "protection", "counter", "sweeper"})])
 
     # 9. combo check: swap out a piece of any combo this vibe / Bracket 3 doesn't allow (early two-card wins etc.)
     must_names = {n.lower() for n in plan["must"]}
@@ -769,7 +880,7 @@ def build(idx, cmd, plan):
                 nonbasic=len(nonbasic), land_pool=land_info["candidates"], warnings=warnings, land_cost=land_cost,
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
-                wincons=[c["name"] for c in picked if A.is_wincon(c)], deck_swaps=deck_swaps,
+                wincons=[c["name"] for c in picked if A.is_wincon(c)], deck_swaps=deck_swaps, simulation=sim_info,
                 deck_links=round(sum(web_final.links(c, True)[0] for c in picked) / max(1, len(picked)), 2),
                 unlinked=[c["name"] for c in picked if web_final.links(c, True)[0] == 0 and c["_syn"] < SYN_ON_PLAN],
                 strategy_counts={n["id"]: sum(1 for x in picked if ST.meets(x, n)) for n in (profile.get("strategy") or {}).get("needs", [])}, speed=dict(turn=speed[0], how=speed[1]),
@@ -969,7 +1080,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked", "simulation")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 

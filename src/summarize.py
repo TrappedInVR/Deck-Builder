@@ -220,6 +220,29 @@ def main():
         A("")
 
     cb = p.get("combos") or {}
+    sim = p.get("simulation")
+    if sim:
+        sp = sim["spread"]
+        A("### Simulated games")
+        A("")
+        A(f"The deck was played **{sim['games']}** times in a simplified game (its cards and {p['commander']} interacting, "
+          f"against three 40-life opponents who remove your best piece, wipe the board once and sometimes play a hate "
+          f"piece). Results compare versions of this deck; they aren't real win rates.")
+        A("")
+        A(f"- Kill turn: **median {sp['median']}**, best 10% by turn {sp['best10']}, worst 10% by turn {sp['worst10']}"
+          + (f", no kill by turn 15 in {round(100 * sp['never'])}% of games" if sp["never"] else "") + "."
+          + (f" By turn 10 the deck has dealt {round(100 * sp['dmg10'])}% of the table's total life." if sp.get("dmg10") is not None else ""))
+        A(f"- Average kill turn {sim['start_kill']} before tuning, **{sim['kill']} after**.")
+        if sim["swaps"]:
+            A("- Swaps the simulation made (each one tested on the same shuffled games):")
+            for w in sim["swaps"]:
+                A(f"  - {w['out']} -> **{w['into']}** ({w['gain']} turns faster on average)")
+        else:
+            A("- No swap made the deck measurably faster, so the build was kept as is.")
+        A(f"- Did the most work: {', '.join(n for n, _ in sim['top'][:6])}.")
+        if sim["quiet"]:
+            A(f"- Rarely mattered in the simulation (worth a look): {', '.join(sim['quiet'][:8])}.")
+        A("")
     A("### Combos")
     A("")
     if not cb.get("available"):
