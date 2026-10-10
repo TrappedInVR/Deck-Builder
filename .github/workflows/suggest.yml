@@ -152,6 +152,14 @@ jobs:
           key: combos-v1-${{ steps.day.outputs.d }}
       - name: Fetch combo data from Commander Spellbook (skipped if cached today; never fails the run)
         run: test -s data/combos.json || python src/fetch_combos.py
+      - id: week
+        run: echo "w=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4            # Scryfall Tagger function tags, once per week (a few hundred polite API calls)
+        with:
+          path: data/tags.json
+          key: tags-v1-${{ steps.week.outputs.w }}
+      - name: Fetch Scryfall Tagger function tags (skipped if cached this week; never fails the run)
+        run: test -s data/tags.json || python src/fetch_tags.py || true
       - name: Find commanders that fit
         run: >
           python src/build_deck.py --suggest-only --vibe "$VIBE" --colors "$COLORS" --mech "$MECH"
