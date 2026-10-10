@@ -55,7 +55,8 @@ SIM_GAIN = 0.08         # a swap must make the deck kill at least this many turn
 INSURANCE = {"removal", "protection", "board_protect", "counter", "sweeper"}
 LINK_CAP = 2.5          # links beyond this don't add more (a card can't be MORE than fully woven in)
 SYN_ON_PLAN = 8          # synergy at/above this = "on plan" for counting
-MAX_BUDGET = 500.0       # house rule: nonland cards only; lands are never counted
+MAX_BUDGET = 1000.0      # house rule: nonland cards only; lands are never counted
+DEFAULT_BUDGET = 500.0   # what a blank Budget box means (vibes may stretch above it, see options.budget_stretch)
 COMBO_DB = None          # set by main() from data/combos.json (Commander Spellbook); None = no combo checks
 
 
@@ -231,6 +232,16 @@ def build(idx, cmd, plan):
     if not profile["plans"] and mech and A.plan_for_theme(mech):
         # the commander has no engine of its own: your theme becomes the deck's plan
         profile["plans"] = [dict(name=A.plan_for_theme(mech), weight=3.0, why=[f"your {mech} theme (the commander has no engine of its own)"])]
+    # ONE game plan, decided by what the commander does (analyze.thesis): the lead route is the plan; the others are
+    # only side effects (a card that fits them must ALSO serve the plan to be "on plan")
+    th = profile.get("thesis") or {}
+    if th.get("lead"):
+        lead = next((p for p in profile["plans"] if p["name"] == th["lead"]), None) or \
+            next((dict(name=r["name"], weight=r["weight"], why=r["why"], style=r["style"]) for r in profile["routes"]
+                  if r["name"] == th["lead"]), None)
+        if lead:
+            profile["side_plans"] = [p["name"] for p in profile["plans"] if p["name"] != lead["name"]]
+            profile["plans"] = [lead]
     typal = [t for t in profile["typal"] if t.lower() not in {x.lower() for x in CM.tribe_types(tribe)}]
     fit, natural, _raw = A.vibe_fit(cmd, O.VIBES)
     vmatch = A.fit_label(fit[plan["vibe_label"]], natural == plan["vibe_label"])
@@ -283,6 +294,15 @@ def build(idx, cmd, plan):
     st["limit"] = n_nonland
     tagc, vtc, planc = Counter(), Counter(), Counter()
     per_card_cap = max(5.0, budget * 0.10)
+    stretch = plan.get("budget_stretch", 0.0)
+    stretch_card_cap = max(per_card_cap, (budget + stretch) * 0.15)
+
+    def worth_stretch(c):
+        """Cards worth going above the default budget for: Game Changers, staples, and strong cards that clearly fit
+        the commander. Everything else must fit the default budget."""
+        if not stretch:
+            return False
+        return bool(c["game_changer"] or is_staple(c) or (c.get("_syn", 0) >= 30 and c.get("_q", 0) >= 70))
     tag_caps = {"extra_turn": vibe["max_extra_turns"], "tutor": vibe["max_tutors"]}
     if cmd["game_changer"] and st["gc"] > max_gc:
         warnings.append(f"{cmd['name']} is itself a Game Changer, so this deck is at least Bracket 3.")
@@ -348,10 +368,11 @@ def build(idx, cmd, plan):
             return "marked 'never' in data/overrides.json"
         if c.get("_avoid"):
             return f"works against the game plan ({c['_avoid']})"
-        if price(c) > per_card_cap:
+        worth = worth_stretch(c)
+        if price(c) > (stretch_card_cap if worth else per_card_cap):
             return f"too pricey (${price(c):.0f})"
-        if st["spent"] + price(c) > budget:
-            return "over budget"
+        if st["spent"] + price(c) > budget + (stretch if worth else 0):
+            return "over budget" + (f" (even with the vibe's ${stretch:.0f} stretch)" if worth and stretch else "")
         if c["game_changer"] and st["gc"] >= gc_target:
             return "Game Changer limit (Bracket 3)" if st["gc"] >= max_gc else "Game Changer target for this vibe reached"
         power = is_power(c)
@@ -470,15 +491,25 @@ def build(idx, cmd, plan):
         fill(nonland, ok, lambda ok=ok: sum(1 for x in picked if ok(x)), target, "Counts for the commander",
              lambda c: f"{c['_syn_why']}: {E.describe(c)}{needs_text(c)}")
 
-    # 4. the commander's game plan: the core of the deck, split across its main plans by weight
+    # 4. THE game plan (one, from the commander's role): cards must serve it, not just share a keyword with it
+    serves = set(th.get("serves") or [])
+
+    def serves_plan(c):
+        return bool(set(c.get("_needs") or []) & serves) or not serves
+
+    if th.get("role") == "enabler" and th.get("beneficiary"):
+        ben = th["beneficiary"]
+        is_b = lambda c: A.is_beneficiary(c, ben) and c["_q"] >= 30
+        fill(nonland, is_b, lambda: sum(1 for x in picked if A.is_beneficiary(x, ben)),
+             22 if ben["kind"] == "creature_type" else 26, "Commander plan",
+             lambda c: f"buffed by your commander ({ben['label']}): {E.describe(c)}{needs_text(c)}")
     if profile["plans"]:
-        tw = sum(p["weight"] for p in profile["plans"][:3])
         total = 26 if not (mech or narr or tribe) else 22
-        for p in profile["plans"][:3]:
-            target = max(4, round(total * p["weight"] / tw))
-            have = lambda name=p["name"]: planc[name]
-            fill(nonland, lambda c, pl=p: A.plan_hits(c, pl) and c["_syn"] >= SYN_ON_PLAN and c["_q"] >= 32,
-                 have, target, "Commander plan", lambda c, name=p["name"]: f"{name}: {E.describe(c)}")
+        p = profile["plans"][0]
+        fill(nonland, lambda c, pl=p: (A.plan_hits(c, pl) or th.get("role") in ("finisher", "enabler"))
+             and serves_plan(c) and c["_syn"] >= SYN_ON_PLAN and c["_q"] >= 32,
+             lambda: sum(1 for x in picked if serves_plan(x) and x["_syn"] >= SYN_ON_PLAN), total, "Commander plan",
+             lambda c, name=p["name"]: f"{c['_syn_why'] or name}: {E.describe(c)}{needs_text(c)}")
         if typal:
             fill(nonland, lambda c: c["_syn_why"].endswith("(named by your commander)"),
                  lambda: sum(1 for x in picked if x["_syn_why"].endswith("(named by your commander)")), 8,
@@ -617,6 +648,11 @@ def build(idx, cmd, plan):
         vt = O.vibe_tags(c)
         return any(slot in vt and vtc[slot] >= need * 2 for slot, need in vibe["slots"].items())
 
+    for c in nonland:                          # first: only cards that serve THE plan
+        if len(picked) >= n_nonland:
+            break
+        if serves_plan(c) and c["_q"] >= 30 and not over_cap(c):
+            try_add(c, "Best remaining fit", lambda_reason(c), creature_cap=cap)
     for c in nonland:
         if len(picked) >= n_nonland:
             break
@@ -905,6 +941,7 @@ def build(idx, cmd, plan):
                 land_kinds=land_info["kinds"], tapped_lands=land_info["tapped"],
                 land_list=[dict(name=c["name"], kind=k) for c, k in chosen_lands], feel={k: vtc[k] for k in vibe["slots"]},
                 wincons=[c["name"] for c in picked if A.is_wincon(c)], deck_swaps=deck_swaps, simulation=sim_info,
+                budget=budget, budget_stretch=stretch, stretched=round(max(0.0, st["spent"] - budget), 2),
                 reference=dict(ref.summary(), in_deck=sorted(c["name"] for c in picked if c.get("_ref"))),
                 deck_links=round(sum(web_final.links(c, True)[0] for c in picked) / max(1, len(picked)), 2),
                 unlinked=[c["name"] for c in picked if web_final.links(c, True)[0] == 0 and c["_syn"] < SYN_ON_PLAN],
@@ -955,14 +992,17 @@ def base_plan(a, vibe_label, mech, narr):
     warnings = [f"Avoid: don't recognize {u!r}. Known words: {', '.join(sorted(O.AVOID_WORDS))}" for u in unknown]
     if a.no_extra_turns:
         user_avoid.add("extra turns")
+    typed = bool(str(a.budget).strip())
     try:
-        budget = float(a.budget) if str(a.budget).strip() else float(vibe["budget"])
+        budget = float(str(a.budget).replace("$", "").replace(",", "")) if typed else float(vibe.get("budget", DEFAULT_BUDGET))
     except ValueError:
         raise SystemExit(f"Budget must be a number of dollars, got {a.budget!r}")
     if budget > MAX_BUDGET:
         warnings.append(f"Budget capped at ${MAX_BUDGET:.0f} (house rule). Lands never count against it.")
         budget = MAX_BUDGET
-    return dict(vibe_label=vibe_label, vibe=vibe, mech=mech, narr=narr, budget=budget,
+    # blank Budget: the vibe may stretch above the default for cards worth it; a typed budget is a hard cap
+    stretch = 0.0 if typed else max(0.0, min(float(vibe.get("budget_stretch", 0)), MAX_BUDGET - budget))
+    return dict(vibe_label=vibe_label, vibe=vibe, mech=mech, narr=narr, budget=budget, budget_stretch=stretch,
                 lands=a.lands or vibe["lands"], max_gc=min(vibe["max_gc"], 3) if a.max_gc is None else a.max_gc,
                 must=split_names(a.must), exclude=split_names(a.exclude), avoid=user_avoid,
                 reference=split_names(getattr(a, "reference", "")),
@@ -1106,7 +1146,7 @@ def write_outputs(a, cmd, plan, res, how, rows, note, seed, randomized, better=N
         info.update({k: res[k] for k in ("total", "spent", "gc_cards", "roles", "quotas", "tutors", "extra_turns", "creatures",
                                          "creature_cap", "members", "mech_hits", "narr_hits", "nonbasic", "feel", "onplan",
                                          "plan_counts", "avg_quality", "profile", "vibe_match", "natural_vibe", "report", "edged",
-                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked", "simulation", "reference")})
+                                         "land_cost", "land_kinds", "tapped_lands", "land_list", "combos", "validation", "wincons", "speed", "strategy_counts", "deck_swaps", "deck_links", "unlinked", "simulation", "reference", "budget_stretch", "stretched")})
     json.dump(info, open(os.path.join(outdir, "plan.json"), "w"), indent=2)
     return info
 

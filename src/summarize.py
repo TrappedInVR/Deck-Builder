@@ -42,8 +42,11 @@ def main():
         A(f"| **Commander** | **{p['commander']}** ({p['commander_how']}) |")
         A(f"| Tribe | {p['tribe'] or 'none'} ({p['tribe_mode']}) |")
         A(f"| Bracket | {p['bracket']} (every vibe builds a Bracket 3 deck) |")
-        A(f"| Budget | ${p['budget']:.0f} for the nonland cards (estimated ${p.get('spent', 0):.0f}; prices are rough). "
-          f"Lands never count against it. |")
+        st_ = p.get("budget_stretch") or 0
+        A(f"| Budget | ${p['budget']:.0f} for the nonland cards"
+          + (f", and this vibe may stretch up to ${p['budget'] + st_:.0f} for cards worth it (Game Changers, staples, strong "
+             f"on-plan cards); it used ${p.get('stretched', 0):.0f} of that stretch" if st_ else "")
+          + f" (estimated ${p.get('spent', 0):.0f}; prices are rough). Lands never count against it. |")
         A(f"| Seed | {p['seed']} (use it to reproduce a random result) |")
         if p["avoid"]:
             A(f"| Avoiding | {', '.join(p['avoid'])} |")
@@ -78,8 +81,15 @@ def main():
     prof = p.get("profile") or {}
     A(f"### How {p['commander']} wants to win")
     A("")
+    th = prof.get("thesis") or {}
+    if th.get("text"):
+        A(f"**The game plan:** {th['text']}")
+        if prof.get("side_plans"):
+            A(f"_Not separate plans here, only side effects: {', '.join(prof['side_plans'])}. A card that fits them only gets "
+              f"in if it also serves the plan above._")
+        A("")
     if prof.get("plans"):
-        A("The deck is built around these plans, strongest first. Each is read straight from the commander's card:")
+        A("The plan, as read straight from the commander's card:")
         A("")
         for pl in prof["plans"]:
             ev = "; ".join(f'"{w}"' for w in pl["why"])

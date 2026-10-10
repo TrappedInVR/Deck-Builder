@@ -42,7 +42,9 @@ BUILD_INPUTS = [
     inp("exclude", "9. Cards to leave out (optional), separated by ;", "string", ""),
     inp("reference", "10. Reference cards (optional), separated by ;: cards you've seen real decks run with this commander "
         "(e.g. from browsing EDHREC yourself). Strongly favored, but still checked against every rule.", "string", ""),
-    inp("budget", "11. Budget in $ for the nonland cards (optional, max 500). Lands never count.", "string", ""),
+    inp("budget", "11. Budget in $ for the nonland cards (optional, max 1000). Blank = $500, and stronger vibes may "
+        "stretch above it (up to $1000) only for cards worth it. A number you type is a hard cap. Lands never count.",
+        "string", ""),
     inp("randomize", "12. Surprise me! Random vibe, colors and themes. Anything you typed above still counts.", "boolean", False),
     inp("seed", "13. Seed (optional): copy the number from a past run's summary to rebuild the same random deck.", "string", ""),
 ]

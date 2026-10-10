@@ -309,6 +309,108 @@ def _negated(text, start):
     return bool(CX._NEG_BEFORE.search(text[:start][-40:].lower()))
 
 
+_BUFF = [
+    re.compile(r"\b(?:other |each other )?(?:([A-Za-z]+) )?([A-Za-z]+?)s? you control (?:get \+|have |gain |get [^.]{0,25}and (?:have|gain))", re.I),
+    re.compile(r"\b([A-Za-z]+) spells you cast cost \{\d\} less", re.I),
+    re.compile(r"\bwhenever (?:another|a|an) (?:nontoken )?([A-Za-z]+) you control (?:enters|attacks|dies|deals combat damage)"
+               r"[^.]{0,80}(?:put (?:a|an|\w+) \+1/\+1 counter on (?:it|that)|it gets|it gains|create a token that's a copy)", re.I),
+    re.compile(r"\bput (?:a|an|\w+) \+1/\+1 counters? on each (?:other )?([A-Za-z]+) you control", re.I),
+]
+_CARD_TYPES = {"creature": "Creature", "artifact": "Artifact", "enchantment": "Enchantment", "instant": "Instant",
+               "sorcery": "Sorcery", "planeswalker": "Planeswalker", "token": "Creature", "legendary": "Legendary",
+               "equipment": "Equipment", "aura": "Aura", "vehicle": "Vehicle", "noncreature": "Noncreature"}
+
+
+def _enabler_target(x):
+    """What the commander makes better for OTHER cards: {'type', 'label', 'text'} or None.
+    'Other Elves you control get +1/+1' -> Elf; 'Artifact spells you cast cost {1} less' -> Artifact;
+    'Creatures you control have flying' -> Creature."""
+    for rx in _BUFF:
+        m = rx.search(x)
+        if not m:
+            continue
+        w = m.group(m.lastindex).lower()
+        if m.lastindex == 2 and m.group(1):
+            adj = m.group(1).lower()
+            if adj in ("legendary", "artifact", "enchantment", "nontoken") or _noun_type(adj) not in (None, "creature", "token"):
+                w = adj                            # "Legendary creatures you control", "Elf creatures you control"
+        if w in ("land", "permanent", "card", "opponent", "player"):
+            continue
+        if w.rstrip("s") in _CARD_TYPES or w in _CARD_TYPES:
+            t = _CARD_TYPES.get(w, _CARD_TYPES.get(w.rstrip("s")))
+            return dict(type=t, kind="card_type", label="legendary creatures" if t == "Legendary" else t.lower() + "s",
+                        text=m.group(0).strip())
+        t = _noun_type(w + "s") or _noun_type(w)
+        if t and t not in ("land", "permanent"):
+            kind = "card_type" if t in ("creature", "artifact", "enchantment", "token", "planeswalker") else "creature_type"
+            tt = _CARD_TYPES.get(t, t)
+            return dict(type=tt, kind=kind, label=(tt.lower() + "s") if kind == "card_type" else tt + "s", text=m.group(0).strip())
+    return None
+
+
+def is_beneficiary(card, ben):
+    """Does the commander make this card better?"""
+    if not ben:
+        return False
+    tl = card.get("type_line") or ""
+    if ben["type"] == "Noncreature":
+        return "Creature" not in tl and "Land" not in tl
+    if ben["kind"] == "creature_type":
+        sub = tl.split("—", 1)[1] if "—" in tl else ""
+        return "Creature" in tl and (re.search(r"\b%s\b" % re.escape(ben["type"]), sub) is not None
+                                     or "changeling" in (card.get("text") or "").lower())
+    return ben["type"] in tl
+
+
+def thesis(role, routes, inter, conds, strat):
+    """THE game plan, decided by what the commander does (not a split across several plans):
+       finisher -> enable the commander's winning ability (its trigger, its scaling count, its multipliers, protection)
+       enabler  -> fill the deck with what the commander buffs, plus ways to win with that board
+       engine   -> feed its triggers / costs, then turn the value into a win
+       value    -> follow the themes and the strongest route
+    Returns {role, lead (route name), serves: [need ids a card must cover to be 'on plan'], text, side: [other routes]}."""
+    r = role["role"]
+    lead = None
+    if r == "finisher" and routes:
+        fin = " ".join(role.get("lines") or []).lower()
+        lead = max(routes, key=lambda x: (sum(1 for w in x["why"] if w.lower() in fin), x["base"]))
+    elif routes:
+        # the commander's own text decides (base strength), not the vibe
+        lead = max(routes, key=lambda x: x["base"])
+    serves = {"finisher": ["counts", "enabler", "fuel", "retrigger", "amplify", "haste", "board_protect", "enter_engine",
+                           "reference"],
+              "enabler": ["beneficiary", "counts", "enabler", "fuel", "anthem", "board_protect", "enter_engine", "reference"],
+              "engine": ["enabler", "fuel", "payoff", "counts", "enter_engine", "retrigger", "reference"],
+              "value": ["plan", "reference"]}[r]
+    if r == "finisher":
+        bits = []
+        if conds:
+            bits.append("bodies that count for it (" + "; ".join(
+                (f"creatures with {c['keyword']}" if c["kind"] == "keyword" else f"{c['type']}s with {c['stat']} {c['n']} or "
+                 f"{'less' if c['op'] == 'le' else 'greater'}") for c in conds) + "), ideally ones that also bring more")
+        if any(n["id"] == "retrigger" for n in strat.get("needs", [])):
+            bits.append("ways to make its trigger happen again")
+        if any(n["id"] == "amplify" for n in strat.get("needs", [])):
+            bits.append("amplifiers")
+        bits.append("protection for it and the board")
+        text = (f"The commander IS the finisher ({', '.join(role.get('how') or [])}). Every slot that isn't ramp, draw or "
+                f"interaction should enable it: {', '.join(bits)}. Ramp, draw and removal are chosen so they ALSO do this "
+                f"whenever a version that does exists.")
+    elif r == "enabler":
+        b = role["beneficiary"]
+        text = (f"The commander is the ENABLER: it makes your {b['label']} better ('{b['text']}'). The deck is built from "
+                f"the cards it buffs (the best {b['label']} for the job), with ramp, draw and removal that are also "
+                f"{b['label']} where possible, and a few ways to win with the buffed board.")
+    elif r == "engine":
+        text = (f"The commander is an ENGINE ({lead['name'] if lead else 'value'}): the deck feeds its triggers and costs, "
+                f"uses what it makes, and adds win conditions that turn that value into a win.")
+    else:
+        text = "The commander has no engine of its own: the deck follows your themes and its strongest route."
+    side = [x["name"] for x in routes if not lead or x["name"] != lead["name"]]
+    return dict(role=r, lead=lead["name"] if lead else None, serves=serves, text=text, side=side,
+                beneficiary=role.get("beneficiary"))
+
+
 def commander_role(cmd, routes=()):
     """finisher / engine / value, with the ability that wins and any numeric requirement it has.
     finisher: the commander's own ability ends the game (drain, burn the table, 'you win', extra combats, infect,
@@ -341,6 +443,12 @@ def commander_role(cmd, routes=()):
                 f"that trigger, fuel and protect it, and fewer stand-alone win conditions.")
         if req:
             note += f" It needs {req['count']} {req['noun']} ('{req['text']}'), so the deck runs {req['count'] + 4}+ of them."
+    elif _enabler_target(x):
+        ben = _enabler_target(x)
+        role = "enabler"
+        note = (f"It is an ENABLER: it makes your {ben['label']} better ('{ben['text']}'), so the deck is built from cards "
+                f"it buffs, plus ways to win with that buffed board.")
+        return dict(role=role, how=how, lines=lines, requires=req, note=note, beneficiary=ben)
     elif routes:
         role, note = "engine", ("It is an engine, not a finisher: it generates value, so the deck adds dedicated win conditions "
                                 "(team pumps, drains, extra combats, game-ending spells) to turn that value into a win.")
@@ -600,8 +708,9 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
     # the strategic game plan: what multiplies it, what it needs, what beats it (strategy.py)
     import strategy as ST
     strat = ST.plan(cmd, role, conds, parsed, routes)
+    th = thesis(role, routes, inter, conds, strat)
     return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8], role=role, conditions=conds,
-                strategy=strat,
+                strategy=strat, thesis=th,
                 abilities=[dict(kind=a["kind"], text=a["text"], event=a["event"][1] if a["event"] else None,
                                 costs=[c[1] for c in a["costs"]], outputs=[o[1] for o in a["outputs"]], style=a["style"])
                            for a in parsed],
@@ -695,7 +804,7 @@ def plan_hits(card, plan):
 
 
 SYN_CAP = 80.0     # high enough that a card covering several needs still ranks above one covering a single need
-NEED_NAMES = dict(reference="real decks run it with this commander", counts="counts for it", enabler="triggers its abilities", fuel="pays its costs", payoff="uses what it makes",
+NEED_NAMES = dict(beneficiary="is buffed by the commander", reference="real decks run it with this commander", counts="counts for it", enabler="triggers its abilities", fuel="pays its costs", payoff="uses what it makes",
                   plan="fits its game plan", typal="a type it names")
 
 
@@ -722,10 +831,23 @@ def synergy(card, profile, tribe_words=()):
                 best, best_v = p["name"], v
         if p["name"] in hate:
             s -= 6 * p["weight"]
+    th = profile.get("thesis") or {}
+    if th.get("role") == "enabler" and is_beneficiary(card, th.get("beneficiary")):
+        s += 14
+        needs.add("beneficiary")
+        best, best_v = f"buffed by your commander ({th['beneficiary']['text']})", 14
+    elif th.get("role") == "enabler" and (th.get("beneficiary") or {}).get("kind") == "creature_type" and \
+            re.search(r"\b%ss?\b" % re.escape(th["beneficiary"]["type"]), card.get("text") or ""):
+        s += 8                                 # supports the type the commander buffs (Blade of the Bloodchief for Edgar)
+        needs.add("beneficiary")
+        if best_v < 8:
+            best, best_v = f"supports your {th['beneficiary']['label']}", 8
     for p in profile.get("interactions", []):
         h = interaction_hits(card, p)
         if h:
             v = h * p["weight"] * 1.6
+            if th.get("role") == "finisher" and p["kind"] == "payoff":
+                v *= 0.4                       # uses what the finisher makes: nice, not the plan
             s += v
             if h >= 1:
                 needs.add({"keyword": "enabler"}.get(p["kind"], p["kind"]))

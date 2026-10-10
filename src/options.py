@@ -22,7 +22,9 @@ ANY = "Any (no preference)"
 # quotas      = minimum counts of each role the builder tries to include
 # slots       = how many cards of a "feel" (grouphug, chaos, stax, punish...) to reserve
 # pop         = weight on EDHREC popularity (higher = more proven staples, less personality)
-# budget      = USD for the 99's nonland cards (lands never count; see lands.py)
+# budget      = USD for the 99's nonland cards when you leave Budget blank (lands never count; see lands.py)
+# budget_stretch = extra USD this vibe may spend above that default, ONLY on cards worth it (Game Changers, staples,
+#               strong high-synergy cards). Never above $1000 in total. A budget you type is a hard cap.
 # avoid       = things this vibe never includes (same words you can type in the Avoid box)
 # combo_max   = highest Commander Spellbook combo tag allowed (E/C/O = casual, P/S = Bracket 3). R is never allowed.
 # combo_slots = how many complete combos the builder actively adds (0 = only keep ones that happen naturally)
@@ -36,7 +38,7 @@ VIBES = {
     "Relaxed Casual": dict(_B3,
         styles=dict(gentle=1.0, engine=0.4, hug=0.3, aggro=0.1, punish=-0.6, control=-0.6, chaos=-0.2),
         combo_max="O", combo_slots=0,
-        gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, lands=38,
+        gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, budget_stretch=0, lands=38,
         quotas=dict(ramp=10, draw=8, removal=5, counter=1, sweeper=1, recursion=2), slots={}, pop=0.7,
         avoid={"stax", "extra turns", "tutors", "infect", "land destruction", "theft", "discard"},
         personality=dict(gentle=1.4, hug=0.4, engine=0.2, mean=-1.5, pressure=-0.4, stax=-2.0, chaos=-0.3),
@@ -44,7 +46,7 @@ VIBES = {
     "Social Table: Fun for Everyone": dict(_B3,
         styles=dict(hug=1.0, gentle=0.6, chaos=0.3, engine=0.2, punish=-0.6, control=-0.7),
         combo_max="O", combo_slots=0,
-        gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, lands=37,
+        gc_target=0, max_extra_turns=0, max_tutors=0, budget=500, budget_stretch=0, lands=37,
         quotas=dict(ramp=9, draw=8, removal=4, counter=0, sweeper=1, recursion=2),
         slots=dict(grouphug=8, politics=4), pop=0.5,
         avoid={"stax", "extra turns", "tutors", "infect", "land destruction", "discard"},
@@ -53,7 +55,7 @@ VIBES = {
     "Competitive-Casual: Win and Have a Good Time": dict(_B3,
         styles=dict(engine=0.5, aggro=0.4, gentle=0.3, control=0.3, punish=0.3, chaos=-0.1),
         combo_max="P", combo_slots=1,
-        gc_target=2, max_extra_turns=1, max_tutors=2, budget=500, lands=37,
+        gc_target=2, max_extra_turns=1, max_tutors=2, budget=500, budget_stretch=250, lands=37,
         quotas=dict(ramp=10, draw=9, removal=7, counter=3, sweeper=2, recursion=2), slots={}, pop=1.0,
         avoid={"stax", "infect", "land destruction"},
         personality=dict(power=0.9, engine=0.6, gentle=0.3, pressure=0.3, mean=0.2, stax=-0.8, chaos=-0.2), bias=0.3,
@@ -61,7 +63,7 @@ VIBES = {
     "Chaos & Memes: Chaotic Fun": dict(_B3,
         styles=dict(chaos=1.0, hug=0.4, aggro=0.3, engine=0.1, control=-0.4),
         combo_max="O", combo_slots=1,
-        gc_target=1, max_extra_turns=1, max_tutors=0, budget=500, lands=37,
+        gc_target=1, max_extra_turns=1, max_tutors=0, budget=500, budget_stretch=100, lands=37,
         quotas=dict(ramp=9, draw=7, removal=5, counter=1, sweeper=1, recursion=2), slots=dict(chaos=14), pop=0.5,
         avoid={"stax", "infect", "land destruction", "tutors"},
         personality=dict(chaos=2.6, hug=0.5, gentle=0.1, power=-0.3, stax=-1.0),
@@ -69,7 +71,7 @@ VIBES = {
     "Table Threat: Scary to Play Against": dict(_B3,
         styles=dict(punish=1.0, aggro=0.7, engine=0.4, control=0.3, hug=-0.5, gentle=-0.2),
         combo_max="S", combo_slots=1,
-        gc_target=3, max_extra_turns=1, max_tutors=3, budget=500, lands=36,
+        gc_target=3, max_extra_turns=1, max_tutors=3, budget=500, budget_stretch=400, lands=36,
         quotas=dict(ramp=11, draw=9, removal=8, counter=3, sweeper=2, recursion=2), slots=dict(punish=6), pop=1.2,
         avoid={"infect", "land destruction"},
         personality=dict(mean=1.6, pressure=0.7, power=1.0, engine=0.4, hug=-0.8, gentle=-0.3),
@@ -77,7 +79,7 @@ VIBES = {
     "Hostile Control: Stax & Hate": dict(_B3,
         styles=dict(control=1.0, punish=0.8, engine=0.3, hug=-0.7, gentle=-0.4, chaos=-0.3),
         combo_max="S", combo_slots=1,
-        gc_target=3, max_extra_turns=0, max_tutors=2, budget=500, lands=36,
+        gc_target=3, max_extra_turns=0, max_tutors=2, budget=500, budget_stretch=400, lands=36,
         quotas=dict(ramp=10, draw=9, removal=8, counter=5, sweeper=3, recursion=1), slots=dict(stax=7, punish=4), pop=1.0,
         avoid={"infect", "land destruction"},
         personality=dict(stax=2.4, mean=1.5, power=0.3, hug=-1.2, gentle=-0.8),
@@ -86,7 +88,7 @@ VIBES = {
     "Optimized Menace: Max-Power Bracket 3": dict(_B3,
         styles=dict(engine=1.0, aggro=0.5, control=0.5, punish=0.4, chaos=-0.4, hug=-0.4),
         combo_max="S", combo_slots=2,
-        gc_target=3, max_extra_turns=1, max_tutors=4, budget=500, lands=35,
+        gc_target=3, max_extra_turns=1, max_tutors=4, budget=500, budget_stretch=500, lands=35,
         quotas=dict(ramp=12, draw=10, removal=8, counter=4, sweeper=2, recursion=2), slots=dict(fastmana=3), pop=1.5,
         avoid=set(),
         personality=dict(power=2.0, engine=1.0, mean=0.6, pressure=0.3, gentle=-0.2, chaos=-0.5),
@@ -392,8 +394,8 @@ def vibe_criteria_md():
         items = sorted(((k, v) for k, v in d.items() if (v > 0) == pos and v), key=lambda kv: -abs(kv[1]))
         return ", ".join(k for k, _ in items[:n]) or "-"
     rows = ["| Vibe | What it feels like | Commanders it picks | Plans it leads with | Game Changers | Tutors / extra turns | "
-            "Combos | Ramp / draw / removal / counters / wipes / recursion | Signature cards | Never includes | Lands |",
-            "|---|---|---|---|---|---|---|---|---|---|---|"]
+            "Combos | Ramp / draw / removal / counters / wipes / recursion | Signature cards | Never includes | Lands | Budget |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for k, v in VIBES.items():
         q = v["quotas"]
         slots = "; ".join(f"{n} {SLOT_NAMES.get(s, s)}" for s, n in v["slots"].items()) or "-"
@@ -402,5 +404,6 @@ def vibe_criteria_md():
                     f"{top(v['styles'])} (not {top(v['styles'], 2, False)}) | aims for {v['gc_target']} (max 3) | "
                     f"{v['max_tutors']} / {v['max_extra_turns']} | {combos} | "
                     f"{q['ramp']} / {q['draw']} / {q['removal']} / {q['counter']} / {q['sweeper']} / {q['recursion']} | {slots} | "
-                    f"{', '.join(sorted(v['avoid'])) or '-'} | {v['lands']} |")
+                    f"{', '.join(sorted(v['avoid'])) or '-'} | {v['lands']} | "
+                    f"${v['budget']}" + (f" (+${v['budget_stretch']} for cards worth it)" if v.get("budget_stretch") else "") + " |")
     return "\n".join(rows)
