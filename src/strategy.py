@@ -105,6 +105,9 @@ def plan(cmd, role, conds, parsed, routes):
     # --- how it wins
     if is_fin:
         story.append(f"**How it wins:** its own ability ends the game ({', '.join(role.get('how') or [])}).")
+    elif role.get("role") == "enabler":
+        story.append(f"**How it wins:** it makes your {role['beneficiary']['label']} better, so the deck is full of them and "
+                     "wins with that buffed board, backed by a few dedicated win conditions.")
     elif role.get("role") == "engine":
         story.append("**How it wins:** it builds an advantage, and dedicated win conditions turn that advantage into a win.")
     else:
@@ -153,6 +156,15 @@ def plan(cmd, role, conds, parsed, routes):
                          "and out of the count. Pumps until end of turn (after the trigger) are fine.")
     elif floor is not None:
         needs.append(_need("anthem", "pushes your creatures into the count", f"anthems help creatures reach power {floor}", [ANTHEM], 9, 3))
+    if any(r["kind"] == "compare" and r["stat"] == "toughness" for r in creature_rules):
+        facets.append("big toughness")
+        needs.append(_need("toughness_payoff", "turns big toughness into damage",
+                           "high-toughness creatures hit like their toughness, or attack despite defender",
+                           [r"(?:assigns?|deals?) combat damage equal to (?:its|their) toughness",
+                            r"toughness rather than (?:its|their) power", r"damage equal to (?:its|the) toughness",
+                            r"attack as though (?:it|they) didn't have defender", r"\bgets? \+0/\+\d"], 14, 4))
+        story.append("**Make toughness matter:** high-toughness creatures are only threats if they deal damage, so the "
+                     "deck runs cards that make creatures deal combat damage equal to their toughness (and lets defenders attack).")
     if "voltron" in facets:
         story.append("**Biggest threat:** spot removal on the commander. The deck carries extra protection for it.")
     if "graveyard" in facets:

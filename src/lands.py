@@ -142,7 +142,7 @@ def choose(pool, ident, lands, synergy=lambda c: 0, popularity=lambda c: 0, max_
     ident = set(ident)
     rows = []
     for c in pool:
-        if "Land" not in (c.get("type_line") or "") or "Basic" in c["type_line"]:
+        if "Land" not in (c.get("type_line") or "").split("//")[0] or "Basic" in c["type_line"]:   # front face must be a land
             continue
         if re.search(r"\bCreature\b", c["type_line"].split("//")[0]):
             continue

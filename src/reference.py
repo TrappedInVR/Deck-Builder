@@ -74,7 +74,7 @@ def _plan_query(schema):
     if node_type not in types:
         return None, f"can't read the entry type behind {ctype}.{entries['name']}"
     deck = None
-    for name in ("maindeck", "mainDeck", "decklist", "cards", "deck"):
+    for name in ("maindeck", "mainDeck", "cards", "deck", "decklist"):
         deck = next((x for x in types[node_type]["fields"] if x["name"] == name), None)
         if deck:
             break
@@ -126,7 +126,7 @@ def edhtop16(commander, log=print):
             decks = [_names(next(iter(e.values()), None)) for e in (ent or [])]
         decks = [dk for dk in decks if dk]
         if not decks:
-            log(f"EDHTop16: {commander} has entries but no decklists")
+            log(f"EDHTop16: {commander} has entries but no card lists (read via {how}; please paste this line to Claude)")
             return {}
         rates = {}
         for dk in decks:

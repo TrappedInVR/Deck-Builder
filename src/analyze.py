@@ -352,6 +352,14 @@ def is_beneficiary(card, ben):
     """Does the commander make this card better?"""
     if not ben:
         return False
+    if ben.get("kind") == "forge":
+        import forge_db as FG
+        ok = FG.matches(ben["filter"], card)
+        base = ben["filter"].split(",")[0].split(".")[0]
+        return ok and (base != "Creature" or "Creature" in (card.get("type_line") or ""))
+    if ben.get("cond"):
+        import conditions as CN
+        return CN.judge(card, ben["cond"])[0] == "meets"
     tl = card.get("type_line") or ""
     if ben["type"] == "Noncreature":
         return "Creature" not in tl and "Land" not in tl
@@ -684,6 +692,44 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
         p["base"] = p["weight"]
         p["weight"] = _vibe_shift(p["weight"], p["style"], styles)
     role = commander_role(cmd, routes)
+    import forge_db as FG
+    ff = FG.facts(cmd)                  # Forge's script for the commander: the more reliable reading (see below)
+    if ff:
+        if ff["wins"] and role["role"] != "finisher":
+            role = dict(role, role="finisher", how=sorted(set(role.get("how") or []) | set(ff["wins"])),
+                        note=f"Its own ability is a win condition ({', '.join(ff['wins'])}), so the deck is built to ENABLE it.")
+        elif ff["wins"]:
+            role["how"] = sorted(set(role.get("how") or []) | set(ff["wins"]))
+        big_needs = [n for n in ff["needs"] if n["count"] >= 3]
+        if big_needs and not role.get("requires"):
+            nd = big_needs[0]
+            t = FG.subtype_of(nd["filter"]) or nd["filter"]
+            role["requires"] = dict(count=nd["count"], type=t, noun=t + "s", text=nd["text"])
+            if role["role"] == "finisher":
+                role["note"] += f" It needs {nd['count']} {t}s ('{nd['text']}'), so the deck runs {nd['count'] + 4}+ of them."
+        def specific(b):
+            """A buff that says WHICH cards it rewards: a subtype (Vampires), legends, or a stat condition. Generic hints
+            ('Permanent', 'Card') say nothing about deck building."""
+            if "token" in b["filter"].split("."
+                                            )[-1].split("+"):
+                return False                    # "creature tokens you control have...": a token plan, not a card list
+            return bool(FG.subtype_of(b["filter"]) or FG.has_stat_props(b["filter"])) or b["how"] == "static"
+        buffs = [b for b in ff["buffs"] if b["how"] != "hint" and specific(b)] or \
+                [b for b in ff["buffs"] if b["how"] == "hint" and specific(b)]
+        if role["role"] != "finisher" and buffs:
+            flt = buffs[0]["filter"]
+            role = dict(role, role="enabler", beneficiary=dict(type=FG.subtype_of(flt) or "Creature", kind="forge",
+                                                                filter=flt, label=FG.describe_filter(flt).lower(),
+                                                                text=FG.describe_filter(flt)))
+            role["note"] = (f"It is an ENABLER: it makes your {role['beneficiary']['label']} better (read from its Forge "
+                            f"script), so the deck is built from those cards, plus ways to win with that board.")
+        elif role["role"] != "finisher" and ff["counts"] and FG.subtype_of(ff["counts"][0]):
+            t = FG.subtype_of(ff["counts"][0])          # Krenko: X counts Goblins -> the deck wants Goblins
+            flt = ff["counts"][0]
+            role = dict(role, role="enabler", beneficiary=dict(type=t, kind="forge", filter=flt,
+                                                                label=FG.describe_filter(flt).lower(), text=FG.describe_filter(flt)))
+            role["note"] = (f"Its ability scales with your {role['beneficiary']['label']}, so the deck is built from them "
+                            f"(read from its Forge script).")
     if role["role"] == "finisher":
         fin = [ln.lower() for ln in role["lines"]]
         for p in inter:
@@ -700,6 +746,24 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
     # which of your cards actually COUNT for it ("creatures you control with power 2 or less", "with defender"...)
     import conditions as CN
     conds = CN.rules(cmd, role["lines"])
+    # Forge's script for the commander (forge_db.py), when available, is the more reliable reading: every wording is
+    # already collapsed into one vocabulary. It overrides the rules-text reading where they disagree.
+    read_from = "rules text (no Forge script for this card)"
+    if ff:
+        read_from = "Forge card script + rules text"
+        fconds = []
+        for f in ff["counts"] + [b["filter"] for b in ff["buffs"] if b["how"] != "hint"]:
+            fconds += FG.to_conditions(f)
+        # Forge's reading wins outright: its script says exactly what the card counts or rewards, so text guesses
+        # (e.g. "creature token WITH FLYING" read as a flying condition) are dropped
+        seen_k, merged = set(), []
+        for r in fconds:
+            k = (r["kind"], r["type"], r.get("stat"), r.get("op"), r.get("n"), r.get("keyword"))
+            if k not in seen_k:
+                seen_k.add(k)
+                merged.append(r)
+        conds = merged
+
     if conds:
         notes.append("Only some cards count for it: " + "; ".join(CN.describe(r) for r in conds) +
                      ". Cards that count (or make tokens that do) are favored; cards that push yours out of the count are avoided.")
@@ -708,7 +772,15 @@ def analyze(cmd, all_types=frozenset(), vibe=None):
     # the strategic game plan: what multiplies it, what it needs, what beats it (strategy.py)
     import strategy as ST
     strat = ST.plan(cmd, role, conds, parsed, routes)
+    if role["role"] == "enabler" and role.get("beneficiary") and role["beneficiary"]["type"] == "Creature" \
+            and role["beneficiary"].get("kind") != "forge":
+        cc = [r for r in conds if r["type"] in ("creature", "token")]
+        if cc:                                 # it buffs creatures, but only some kinds: the condition says which
+            role["beneficiary"] = dict(role["beneficiary"], cond=cc[0], label=CN.describe(cc[0]).split(" (")[0])
+            role["note"] = (f"It is an ENABLER: it makes your {CN.describe(cc[0]).split(' (')[0]} better ('{role['beneficiary']['text']}'), "
+                            f"so the deck is built from those creatures, plus ways to win with that board.")
     th = thesis(role, routes, inter, conds, strat)
+    th["read_from"] = read_from
     return dict(plans=out, routes=routes, lead_note=lead_note, interactions=inter[:8], role=role, conditions=conds,
                 strategy=strat, thesis=th,
                 abilities=[dict(kind=a["kind"], text=a["text"], event=a["event"][1] if a["event"] else None,

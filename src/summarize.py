@@ -84,6 +84,8 @@ def main():
     th = prof.get("thesis") or {}
     if th.get("text"):
         A(f"**The game plan:** {th['text']}")
+        if th.get("read_from"):
+            A(f"_Read from: {th['read_from']}._")
         if prof.get("side_plans"):
             A(f"_Not separate plans here, only side effects: {', '.join(prof['side_plans'])}. A card that fits them only gets "
               f"in if it also serves the plan above._")
@@ -117,7 +119,8 @@ def main():
         A(f"_(pilot guide unavailable: {e})_")
     role = prof.get("role") or {}
     if role:
-        label = {"finisher": "Finisher", "engine": "Engine", "value": "Value piece"}[role["role"]]
+        label = {"finisher": "Finisher", "enabler": "Enabler", "engine": "Engine",
+                 "value": "Value piece"}.get(role.get("role"), str(role.get("role", "")).title())
         A(f"**The commander's role: {label}.** {role['note']}")
         if p.get("speed"):
             sp = p["speed"]

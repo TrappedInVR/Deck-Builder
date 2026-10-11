@@ -25,6 +25,8 @@ KEYWORDS = ("flying", "defender", "deathtouch", "lifelink", "trample", "haste", 
 _STAT = re.compile(r"\b(creatures?|artifacts?|enchantments?|permanents?|cards?|spells?|tokens?)\b([^.;]{0,30}?)\bwith "
                    r"(power|toughness|mana value|converted mana cost) (\d+|x) or (less|greater|more)", re.I)
 _KW = re.compile(r"\b(creatures?|tokens?)\b((?: you control)?) with (%s)\b" % "|".join(KEYWORDS), re.I)
+_CMP = re.compile(r"\bwith (toughness|power) greater than (?:its|their) (?:power|toughness)", re.I)
+_GAP = re.compile(r"difference between (?:its|their) power and toughness", re.I)
 _MINE = re.compile(r"\byou control\b|\bunder your control\b|\byour (?:library|graveyard|hand)\b|\bsearch your\b|\byou cast\b", re.I)
 _THEIRS = re.compile(r"\b(?:an opponent controls|you don't control|opponents control|target opponent|target player)\b", re.I)
 _COUNTED = re.compile(r"\bnumber of\b|\bfor each\b|\bx is\b|\bequal to\b", re.I)
@@ -73,13 +75,42 @@ def rules(cmd, finisher_lines=()):
         seen.add(key)
         out.append(dict(kind="keyword", type="creature", stat=None, op=None, n=None, keyword=m.group(3).lower(),
                         text=m.group(0), counts=bool(_COUNTED.search(cl)), strong=bool(_COUNTED.search(cl)) or cl.lower() in fin))
+    for m in _CMP.finditer(x):
+        cl = _clause(x, m.start(), m.end())
+        if _THEIRS.search(cl):
+            continue
+        hi = m.group(1).lower()                    # "toughness greater than its power" -> hi=toughness
+        key = ("creature", "compare", hi)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(kind="compare", type="creature", stat=hi, op="gt", n=None, keyword=None, text=m.group(0),
+                        counts=True, strong=True))
+    if _GAP.search(x) and not any(r["kind"] == "compare" for r in out):
+        # "X is the difference between its power and toughness": the bigger the gap the better; which side is
+        # bigger comes from the commander's own body (Doran: 0/5 -> toughness)
+        hi = "toughness" if (num(cmd.get("toughness")) or 0) >= (num(cmd.get("power")) or 0) else "power"
+        out.append(dict(kind="compare", type="creature", stat=hi, op="gt", n=None, keyword=None,
+                        text=_GAP.search(x).group(0), counts=True, strong=True))
     return out
 
 
 def describe(r):
+    if r["kind"] == "compare":
+        lo = "power" if r["stat"] == "toughness" else "toughness"
+        return f"creatures with {r['stat']} greater than {lo} (the bigger the gap, the better)"
     if r["kind"] == "keyword":
         return f"creatures with {r['keyword']}"
     return f"{r['type']}s with {r['stat']} {r['n']} or {'less' if r['op'] == 'le' else 'greater'}"
+
+
+def _gap(p, t, r):
+    return (t - p) if r["stat"] == "toughness" else (p - t)
+
+
+def gap_of(c, r):
+    p, t = num(c.get("power")), num(c.get("toughness"))
+    return _gap(p, t, r) if p is not None and t is not None else 0
 
 
 def _type_ok(c, typ):
@@ -110,6 +141,20 @@ def judge(c, r):
     """('meets'|'makes'|'breaks'|'helps'|'misses'|'', reason) for one card against one rule."""
     text = c.get("text") or ""
     tl = c.get("type_line") or ""
+    if r["kind"] == "compare":
+        if "Creature" not in tl:
+            for m in _TOKEN.finditer(text):
+                p, t = m.group(1), m.group(2)
+                if p.lower() != "x" and t.lower() != "x" and _gap(int(p), int(t), r) > 0:
+                    return "makes", f"makes {p}/{t} tokens ({r['stat']} bigger)"
+            return "", ""
+        p, t = num(c.get("power")), num(c.get("toughness"))
+        if p is None or t is None or "*" in str(c.get("power")) + str(c.get("toughness")):
+            return "", ""
+        g = _gap(p, t, r)
+        if g > 0:
+            return "meets", f"{int(p)}/{int(t)}: {r['stat']} {int(g)} bigger"
+        return "misses", f"{int(p)}/{int(t)} doesn't have {r['stat']} bigger"
     if r["kind"] == "keyword":
         kws = {k.lower() for k in c.get("keywords") or []}
         if "Creature" in tl and (r["keyword"] in kws or re.search(r"(?:^|\n|, )%s\b" % r["keyword"], text, re.I)):
@@ -166,6 +211,8 @@ def bodies(c, r):
     if "Creature" in tl and judge(c, dict(r, _self=True))[0] == "meets":
         n += 1
         parts.append("itself")
+    if r["kind"] == "compare":
+        return n, parts                        # what matters is each body's gap, scored in score()
     for m in _TOKEN_N.finditer(text):
         if r["kind"] == "keyword":
             ok = r["keyword"] in m.group(4).lower()
@@ -193,6 +240,14 @@ def score(c, rule_list):
     for r in rule_list:
         w = 1.5 if r["strong"] else 1.0
         b, parts = bodies(c, r)
+        if r["kind"] == "compare":
+            k, reason = judge(c, r)
+            g = gap_of(c, r) if k == "meets" else 0
+            d = {"meets": 6 + 3 * min(g, 5), "makes": 9, "misses": -10}.get(k, 0) * w
+            s += d
+            if d and not why:
+                why = reason
+            continue
         if b > 0:
             cmc = max(c.get("cmc") or 0, 1)
             d = (5 + 5 * min(b, 4) + 3 * min(b / cmc, 2)) * w

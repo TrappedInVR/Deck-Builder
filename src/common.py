@@ -38,7 +38,9 @@ def face_keys(c_or_name):
 def load_cards(path="data/cards.json"):
     """Return {lowercase name: card}. Double-faced cards are also indexed by front face."""
     import knowledge as K
+    import forge_db
     data_dir = os.path.dirname(path) or "."
+    forge_db.configure(data_dir)
     with open(path, encoding="utf-8") as f:
         cards = json.load(f)
     idx = {}

@@ -551,7 +551,7 @@ def build(idx, cmd, plan):
 
     # 4-c. win conditions: an engine/value commander needs cards that turn its advantage into a win;
     #      a finisher commander keeps a couple as backup in case it's removed
-    win_target = {"finisher": 2, "engine": 4, "value": 5}.get(role.get("role"), 4)
+    win_target = {"finisher": 2, "enabler": 3, "engine": 4, "value": 5}.get(role.get("role"), 4)
     fill(nonland, lambda c: bool(A.is_wincon(c)) and c["_q"] >= 30 and (c["_syn"] >= SYN_ON_PLAN or c["_q"] >= 45),
          lambda: sum(1 for x in picked if A.is_wincon(x)), win_target, "Win condition",
          lambda c: f"{A.is_wincon(c)}: {E.describe(c)}")
@@ -571,19 +571,28 @@ def build(idx, cmd, plan):
         fill(nonland, lambda c, s=slot: s in O.vibe_tags(c), lambda s=slot: vtc[s], need,
              "Vibe", lambda c, s=slot: f"{s} ({plan['vibe_label'].split(':')[0]}): {E.describe(c)}")
 
+    # cards that work AGAINST the commander's plan (a 12/12 for Doran, an anthem for Arabella, a wipe in a go-wide deck)
+    # never come in through themes, tribe or filler, even if they match your theme
+    strong_conds = [r for r in (profile.get("conditions") or []) if r.get("strong")]
+
+    def fights_plan(c):
+        if c.get("_avoid"):
+            return True
+        return any(CN.judge(c, r)[0] in ("misses", "breaks") for r in strong_conds)
+
     # 6. your themes (mechanical first, narrative is a softer nudge)
     heavy = bool(tribe)
     if mech:
-        fill(nonland, lambda c: O.mech_score(c, mech) > 0, lambda: st["mech"], 14 if heavy else 18,
+        fill(nonland, lambda c: O.mech_score(c, mech) > 0 and not fights_plan(c), lambda: st["mech"], 14 if heavy else 18,
              "Your theme", lambda c: f"{mech}: {E.describe(c)}")
     if narr:
-        fill(nonland, lambda c: O.narr_score(c, narr) >= 2, lambda: st["narr"], 7 if (heavy or mech) else 10,
+        fill(nonland, lambda c: O.narr_score(c, narr) >= 2 and not fights_plan(c), lambda: st["narr"], 7 if (heavy or mech) else 10,
              "Your theme", lambda c: f"{narr}: {E.describe(c)}")
 
     # 7. tribe members (only when a tribe is in play)
     if tribe:
         tcount = plan["tribe_count"] or (22 if plan["tribe_mode"] == "explicit" else 14)
-        fill(nonland, lambda c: is_member(c, tribe), lambda: st["members"], tcount,
+        fill(nonland, lambda c: is_member(c, tribe) and not fights_plan(c), lambda: st["members"], tcount,
              "Tribe", lambda c: f"{tribe}: {E.describe(c)}")
 
     # ---- POWER STAGE: the synergy core is done; now Game Changers, combos, tutors and fast mana may join,
@@ -651,12 +660,12 @@ def build(idx, cmd, plan):
     for c in nonland:                          # first: only cards that serve THE plan
         if len(picked) >= n_nonland:
             break
-        if serves_plan(c) and c["_q"] >= 30 and not over_cap(c):
+        if serves_plan(c) and c["_q"] >= 30 and not over_cap(c) and not fights_plan(c):
             try_add(c, "Best remaining fit", lambda_reason(c), creature_cap=cap)
     for c in nonland:
         if len(picked) >= n_nonland:
             break
-        if not over_cap(c):
+        if not over_cap(c) and not fights_plan(c):
             try_add(c, "Best remaining fit", lambda_reason(c), creature_cap=cap)
     for c in nonland:
         if len(picked) >= n_nonland:

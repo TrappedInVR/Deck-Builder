@@ -88,6 +88,20 @@ CACHE_AND_FETCH = """      - uses: actions/checkout@v4
           key: reference-v1-${{ steps.week.outputs.w }}
       - name: Fetch precon decklists from MTGJSON (skipped if cached this week; never fails the run)
         run: test -s data/reference.json || python src/fetch_reference.py || true
+      - uses: actions/cache@v4            # Forge card scripts (structured card logic), once per week
+        with:
+          path: |
+            data/forge
+            data/forge_db.json
+          key: forge-v1-${{ steps.week.outputs.w }}
+      - name: Fetch Forge card scripts (skipped if cached this week; never fails the run)
+        run: |
+          if [ ! -d data/forge/forge-gui/res/cardsfolder ]; then
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/Card-Forge/forge.git data/forge \
+              && git -C data/forge sparse-checkout set forge-gui/res/cardsfolder \
+              && echo "Forge scripts: $(find data/forge/forge-gui/res/cardsfolder -name '*.txt' | wc -l) cards" \
+              || echo "Forge scripts unavailable this run; the builder reads rules text only"
+          fi
 """
 
 build = "\n".join([
